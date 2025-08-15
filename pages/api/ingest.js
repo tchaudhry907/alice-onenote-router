@@ -1,56 +1,66 @@
+// pages/api/ingest.js
 import { parse } from 'cookie';
 import CryptoJS from 'crypto-js';
-import fetch from 'node-fetch';
 
-const MS_TOKEN = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token';
+const TENANT = process.env.MS_TENANT || 'consumers';
+const TOKEN_URL = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
   try {
-    // 1) Get refresh token cookie
     const cookies = parse(req.headers.cookie || '');
-    if (!cookies.rt) return res.status(401).json({ error: 'Not authenticated. Visit /auth/login first.' });
+    if (!cookies.rt) return res.status(401).json({ error: 'Not authenticated. Visit /api/auth/login first.' });
 
     const refresh_token = CryptoJS.AES.decrypt(cookies.rt, process.env.ENCRYPTION_SECRET)
       .toString(CryptoJS.enc.Utf8);
 
-    // 2) Exchange for access token
-    const access = await refreshAccess(refresh_token);
+    // Get access token from refresh
+    const form = new URLSearchParams({
+      client_id: process.env.MS_CLIENT_ID,
+      grant_type: 'refresh_token',
+      refresh_token,
+      redirect_uri: process.env.REDIRECT_URI
+    });
 
-    // 3) Read body
-    const { type, text, image_url, tags } = await readJson(req);
+    const tr = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form
+    });
+    const tj = await tr.json();
+    if (!tr.ok) return res.status(400).json({ error: 'Token refresh failed', details: tj });
+
+    // Read body
+    const body = await readJson(req);
+    const { type, text, image_url, tags } = body || {};
     if (!type || !text) return res.status(400).json({ error: 'type and text are required' });
 
-    // 4) Ensure notebook + sections, get target page
-    const ids = await ensureStructure(access.access_token);
-    const page = await getOrCreatePage(access.access_token, ids, type);
+    // Ensure structure + target page
+    const ids = await ensureStructure(tj.access_token);
+    const page = await getOrCreatePage(tj.access_token, ids, type);
 
-    // 5) Build HTML chunk and append
+    // Append entry
     const html = buildEntryHTML({ type, text, image_url, tags });
     const patch = await fetch(`${GRAPH}/me/onenote/pages/${page.id}/content`, {
       method: 'PATCH',
       headers: {
-        'Authorization': `Bearer ${access.access_token}`,
+        'Authorization': `Bearer ${tj.access_token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify([
-        { target: 'body', action: 'append', position: 'after', content: html }
-      ])
+      body: JSON.stringify([{ target: 'body', action: 'append', position: 'after', content: html }])
     });
 
     if (!patch.ok) {
       return res.status(400).json({ error: 'OneNote append failed', details: await patch.text() });
     }
 
-    return res.status(200).json({ ok: true, pageId: page.id });
+    res.status(200).json({ ok: true, pageId: page.id });
   } catch (e) {
-    return res.status(500).json({ error: e?.message || String(e) });
+    res.status(500).json({ error: e?.message || String(e) });
   }
 }
-
-/** ---------------- helpers ---------------- */
 
 async function readJson(req) {
   const chunks = [];
@@ -59,64 +69,40 @@ async function readJson(req) {
   catch { return {}; }
 }
 
-async function refreshAccess(refresh_token) {
-  const params = new URLSearchParams({
-    client_id: process.env.MS_CLIENT_ID,
-    grant_type: 'refresh_token',
-    refresh_token,
-    redirect_uri: process.env.REDIRECT_URI
-  });
-
-  const r = await fetch(MS_TOKEN, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error(`Token refresh failed: ${JSON.stringify(j)}`);
-  return j;
-}
-
 async function ensureStructure(bearer) {
-  // Find or create notebook "Alice Hub" and sections
-  const nbResp = await fetch(`${GRAPH}/me/onenote/notebooks?$select=id,displayName`, {
+  // Find/create notebook and sections
+  const nb = await (await fetch(`${GRAPH}/me/onenote/notebooks?$select=id,displayName`, {
     headers: { Authorization: `Bearer ${bearer}` }
-  });
-  const nb = await nbResp.json();
+  })).json();
 
   let hub = nb.value?.find(n => n.displayName === 'Alice Hub') || nb.value?.[0];
   if (!hub) {
-    // Force-create OneNote surface with a seed page
-    const init = await fetch(`${GRAPH}/me/onenote/pages`, {
+    // Create a seed page to force notebook surface
+    await fetch(`${GRAPH}/me/onenote/pages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'text/html' },
       body: `<html><head><title>Alice Hub (init)</title></head><body>Init</body></html>`
     });
-    if (!init.ok) throw new Error('Failed to create initial page/notebook');
     const nb2 = await (await fetch(`${GRAPH}/me/onenote/notebooks?$select=id,displayName`, {
       headers: { Authorization: `Bearer ${bearer}` }
     })).json();
     hub = nb2.value?.find(n => n.displayName === 'Alice Hub') || nb2.value?.[0];
   }
 
-  // Sections we want
   const want = ['Daily Diary', 'FoodLog', 'GymLog', 'Wardrobe', 'Reference Items'];
-
-  const secResp = await fetch(`${GRAPH}/me/onenote/notebooks/${hub.id}/sections?$select=id,displayName`, {
+  const sec = await (await fetch(`${GRAPH}/me/onenote/notebooks/${hub.id}/sections?$select=id,displayName`, {
     headers: { Authorization: `Bearer ${bearer}` }
-  });
-  const sec = await secResp.json();
+  })).json();
 
   const map = {};
   for (const label of want) {
     let s = sec.value?.find(x => x.displayName === label);
     if (!s) {
-      const mk = await fetch(`${GRAPH}/me/onenote/notebooks/${hub.id}/sections`, {
+      s = await (await fetch(`${GRAPH}/me/onenote/notebooks/${hub.id}/sections`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ displayName: label })
-      });
-      s = await mk.json();
+      })).json();
     }
     map[label] = s.id;
   }
@@ -148,7 +134,7 @@ async function getOrCreatePage(bearer, ids, type) {
     });
     const txt = await create.text();
     if (!create.ok) throw new Error(`Create page failed: ${txt}`);
-    try { page = JSON.parse(txt); } catch { /* some endpoints return no JSON; re-read list */ 
+    try { page = JSON.parse(txt); } catch {
       const reread = await (await fetch(`${GRAPH}/me/onenote/sections/${sectionId}/pages?$select=id,title`, {
         headers: { Authorization: `Bearer ${bearer}` }
       })).json();
