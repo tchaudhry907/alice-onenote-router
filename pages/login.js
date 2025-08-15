@@ -1,8 +1,9 @@
+// pages/login.js
 export default function Login() {
-  // SSR-less guard: if someone hits this statically rendered page,
-  // bounce them to the API route that starts the OAuth flow.
-  if (typeof window !== 'undefined') {
-    window.location.href = '/api/auth/login';
+  // Immediately redirect to the API route that starts the Microsoft login
+  if (typeof window !== "undefined") {
+    window.location.href = "/api/auth/login";
   }
+  // Nothing to render; this page just redirects
   return null;
 }
