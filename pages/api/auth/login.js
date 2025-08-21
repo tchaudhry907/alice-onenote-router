@@ -1,15 +1,13 @@
-// pages/api/auth/login.js
 import crypto from "crypto";
 import { serialize } from "cookie";
 
-const AUTH_TENANT = "common"; // <-- use 'common' (supports personal + org accounts)
-const AUTH_BASE = "https://login.microsoftonline.com";
-const AUTH_URL = `${AUTH_BASE}/${AUTH_TENANT}/oauth2/v2.0/authorize`;
+// Force personal Microsoft accounts for sign-in:
+const AUTH_TENANT = "consumers";
+const AUTH_URL = `https://login.microsoftonline.com/${AUTH_TENANT}/oauth2/v2.0/authorize`;
 
 const clientId = process.env.MS_CLIENT_ID;
 const redirectUri = process.env.REDIRECT_URI;
 
-// Scopes needed for sign-in + OneNote
 const scope = [
   "openid",
   "profile",
@@ -18,22 +16,13 @@ const scope = [
   "Notes.ReadWrite.All"
 ].join(" ");
 
-export default async function handler(req, res) {
-  // PKCE: code_verifier + code_challenge
+export default function handler(req, res) {
   const verifier = crypto.randomBytes(32).toString("base64url");
-  const challenge = crypto
-    .createHash("sha256")
-    .update(verifier)
-    .digest("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
 
-  // short-lived, httpOnly cookie to store the verifier
   res.setHeader("Set-Cookie", [
     serialize("pkce_verifier", verifier, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-      path: "/",
-      maxAge: 300,
+      httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 300
     }),
   ]);
 
