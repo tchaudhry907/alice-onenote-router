@@ -13,6 +13,18 @@ function parseCookies(req) {
   );
 }
 
+function setCookie(res, name, value, { maxAge = 3600 } = {}) {
+  const cookie = [
+    `${name}=${value}`,
+    'Path=/',
+    `Max-Age=${maxAge}`,
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax'
+  ].join('; ');
+  res.setHeader('Set-Cookie', cookie);
+}
+
 function clearCookie(res, name) {
   res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
 }
@@ -42,7 +54,7 @@ export default async function handler(req, res) {
       return res.status(400).send('Invalid state. Start at /api/auth/login');
     }
 
-    // Exchange code for tokens
+    // Exchange authorization code for tokens
     const tokenUrl = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`;
     const body = new URLSearchParams({
       client_id: MS_CLIENT_ID,
@@ -57,7 +69,6 @@ export default async function handler(req, res) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body
     });
-
     const tokenJson = await tokenRes.json();
 
     if (!tokenRes.ok) {
@@ -67,4 +78,23 @@ export default async function handler(req, res) {
 
     // Clean PKCE cookies
     clearCookie(res, 'pkce_verifier');
-    clear
+    clearCookie(res, 'oauth_state');
+
+    // Store access/refresh tokens as short-lived httpOnly cookies (demo only).
+    // In a real app, store/rotate them in a server-side session or DB.
+    if (tokenJson.access_token) {
+      setCookie(res, 'session_access_token', tokenJson.access_token, { maxAge: tokenJson.expires_in || 3600 });
+    }
+    if (tokenJson.refresh_token) {
+      // MS issues refresh tokens for delegated flows when allowed.
+      setCookie(res, 'session_refresh_token', tokenJson.refresh_token, { maxAge: 60 * 60 * 24 * 7 });
+    }
+
+    // Redirect somewhere friendly—home page works for our quick test
+    res.writeHead(302, { Location: '/' });
+    res.end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Callback error');
+  }
+}
