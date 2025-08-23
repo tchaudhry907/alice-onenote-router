@@ -1,40 +1,70 @@
-import crypto from "crypto";
-import { serialize } from "cookie";
+// pages/api/auth/login.js
+import crypto from 'crypto';
 
-// Force personal Microsoft accounts for sign-in:
-const AUTH_TENANT = "consumers";
-const AUTH_URL = `https://login.microsoftonline.com/${AUTH_TENANT}/oauth2/v2.0/authorize`;
+function base64url(input) {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
 
-const clientId = process.env.MS_CLIENT_ID;
-const redirectUri = process.env.REDIRECT_URI;
+function setCookie(res, name, value, { maxAge = 300 } = {}) {
+  const cookie = [
+    `${name}=${value}`,
+    'Path=/',
+    `Max-Age=${maxAge}`,
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax'
+  ].join('; ');
+  res.setHeader('Set-Cookie', cookie);
+}
 
-const scope = [
-  "openid",
-  "profile",
-  "offline_access",
-  "User.Read",
-  "Notes.ReadWrite.All"
-].join(" ");
+export default async function handler(req, res) {
+  try {
+    const { MS_CLIENT_ID, MS_TENANT, REDIRECT_URI } = process.env;
 
-export default function handler(req, res) {
-  const verifier = crypto.randomBytes(32).toString("base64url");
-  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+    if (!MS_CLIENT_ID || !MS_TENANT || !REDIRECT_URI) {
+      return res
+        .status(500)
+        .send('Missing required env vars: MS_CLIENT_ID / MS_TENANT / REDIRECT_URI');
+    }
 
-  res.setHeader("Set-Cookie", [
-    serialize("pkce_verifier", verifier, {
-      httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 300
-    }),
-  ]);
+    const verifier = base64url(crypto.randomBytes(32));
+    const challenge = base64url(
+      crypto.createHash('sha256').update(verifier).digest()
+    );
+    const state = base64url(crypto.randomBytes(16));
 
-  const params = new URLSearchParams({
-    client_id: clientId,
-    response_type: "code",
-    redirect_uri: redirectUri,
-    response_mode: "query",
-    scope,
-    code_challenge: challenge,
-    code_challenge_method: "S256",
-  });
+    setCookie(res, 'pkce_verifier', verifier, { maxAge: 600 });
+    setCookie(res, 'oauth_state', state, { maxAge: 600 });
 
-  res.redirect(`${AUTH_URL}?${params.toString()}`);
+    const scope = [
+      'openid',
+      'profile',
+      'offline_access',
+      'Notes.ReadWrite.All',
+      'User.Read'
+    ].join(' ');
+
+    const params = new URLSearchParams({
+      client_id: MS_CLIENT_ID,
+      response_type: 'code',
+      redirect_uri: REDIRECT_URI,
+      response_mode: 'query',
+      scope,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state
+    });
+
+    const authUrl = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/authorize?${params.toString()}`;
+
+    res.writeHead(302, { Location: authUrl });
+    res.end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Auth init error');
+  }
 }
