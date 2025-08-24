@@ -31,7 +31,7 @@ function clearCookie(res, name) {
 
 export default async function handler(req, res) {
   try {
-    const { MS_CLIENT_ID, MS_TENANT, REDIRECT_URI } = process.env;
+    const { MS_CLIENT_ID, MS_CLIENT_SECRET, MS_TENANT, REDIRECT_URI } = process.env;
     if (!MS_CLIENT_ID || !MS_TENANT || !REDIRECT_URI) {
       return res
         .status(500)
@@ -39,31 +39,27 @@ export default async function handler(req, res) {
     }
 
     const { code, state } = req.query || {};
-    if (!code) {
-      return res.status(400).send('Missing "code". Start at /api/auth/login');
-    }
+    if (!code) return res.status(400).send('Missing "code". Start at /api/auth/login');
 
     const cookies = parseCookies(req);
     const verifier = cookies['pkce_verifier'];
     const savedState = cookies['oauth_state'];
+    if (!verifier) return res.status(400).send('Missing PKCE verifier. Start at /api/auth/login');
+    if (!savedState || savedState !== state) return res.status(400).send('Invalid state.');
 
-    if (!verifier) {
-      return res.status(400).send('Missing PKCE verifier. Start at /api/auth/login');
-    }
-    if (!savedState || savedState !== state) {
-      return res.status(400).send('Invalid state. Start at /api/auth/login');
-    }
-
-    // Exchange authorization code for tokens
+    // Build token exchange payload
     const tokenUrl = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`;
-    const body = new URLSearchParams({
+    const params = {
       client_id: MS_CLIENT_ID,
       grant_type: 'authorization_code',
       code,
       redirect_uri: REDIRECT_URI,
       code_verifier: verifier
-    });
+    };
+    // For confidential "Web" apps Azure expects a client_secret:
+    if (MS_CLIENT_SECRET) params.client_secret = MS_CLIENT_SECRET;
 
+    const body = new URLSearchParams(params);
     const tokenRes = await fetch(tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -73,24 +69,21 @@ export default async function handler(req, res) {
 
     if (!tokenRes.ok) {
       console.error('Token exchange failed:', tokenJson);
-      return res.status(500).send('Token exchange failed');
+      return res.status(500).send(`Token exchange failed: ${tokenJson.error_description || tokenJson.error || 'unknown'}`);
     }
 
     // Clean PKCE cookies
     clearCookie(res, 'pkce_verifier');
     clearCookie(res, 'oauth_state');
 
-    // Store access/refresh tokens as short-lived httpOnly cookies (demo only).
-    // In a real app, store/rotate them in a server-side session or DB.
+    // Demo session cookies (short-lived). In production, store server-side.
     if (tokenJson.access_token) {
       setCookie(res, 'session_access_token', tokenJson.access_token, { maxAge: tokenJson.expires_in || 3600 });
     }
     if (tokenJson.refresh_token) {
-      // MS issues refresh tokens for delegated flows when allowed.
       setCookie(res, 'session_refresh_token', tokenJson.refresh_token, { maxAge: 60 * 60 * 24 * 7 });
     }
 
-    // Redirect somewhere friendly—home page works for our quick test
     res.writeHead(302, { Location: '/' });
     res.end();
   } catch (err) {
