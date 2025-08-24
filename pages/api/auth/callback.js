@@ -1,90 +1,128 @@
 // pages/api/auth/callback.js
-import fetch from "node-fetch";
-
-const TENANT = process.env.MS_TENANT_ID || process.env.MS_TENANT || "consumers";
-const CLIENT_ID = process.env.MS_CLIENT_ID;
-const CLIENT_SECRET = process.env.MS_CLIENT_SECRET;   // we ARE using a confidential client
-const REDIRECT_URI = process.env.REDIRECT_URI;
+const {
+  MS_CLIENT_ID,
+  MS_CLIENT_SECRET,
+  MS_TENANT_ID,
+  APP_BASE_URL,
+} = process.env;
 
 function readCookie(req, name) {
-  const h = req.headers.cookie || "";
-  const map = Object.fromEntries(h.split(";").map(c => c.trim().split("=").map(decodeURIComponent)).filter(p => p[0]));
-  return map[name];
+  const raw = req.headers.cookie || "";
+  return raw
+    .split(/; */)
+    .map(c => c.split("="))
+    .reduce((acc, [k, ...v]) => {
+      if (!k) return acc;
+      const key = decodeURIComponent(k.trim());
+      const val = decodeURIComponent((v.join("=") || "").trim());
+      acc[key] = val;
+      return acc;
+    }, {})[name];
+}
+
+function cookieStr(name, value, opts = {}) {
+  const {
+    httpOnly = true,
+    secure = true,
+    sameSite = "Lax",
+    path = "/",
+    maxAge,
+  } = opts;
+  const parts = [`${name}=${encodeURIComponent(value)}`];
+  if (maxAge) parts.push(`Max-Age=${maxAge}`);
+  if (path) parts.push(`Path=${path}`);
+  if (sameSite) parts.push(`SameSite=${sameSite}`);
+  if (secure) parts.push("Secure");
+  if (httpOnly) parts.push("HttpOnly");
+  return parts.join("; ");
 }
 
 export default async function handler(req, res) {
+  const { code, state, error, error_description } = req.query || {};
+
   try {
-    if (req.method !== "GET") return res.status(405).send("Method not allowed");
-
-    const { code, state, error, error_description } = req.query;
-
-    // if Azure sent back an error
     if (error) {
-      return res.status(400).send(`Sign‑in error: ${error}: ${error_description || ""}`);
+      // surface auth error
+      return res
+        .status(400)
+        .send(`Auth error: ${error}; ${error_description || ""}`);
     }
 
-    // state / verifier from cookies
-    const expectedState = readCookie(req, "oauth_state");
-    const verifier = readCookie(req, "pkce_verifier");
-    if (!expectedState || state !== expectedState) {
-      return res.status(400).send("Invalid or missing state. Start at /api/auth/login");
-    }
     if (!code) {
-      return res.status(400).send('Missing "code" on callback.');
-    }
-    if (!verifier) {
-      return res.status(400).send('Missing PKCE verifier. Start at /api/auth/login');
-    }
-
-    if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI) {
-      return res.status(500).send("Server is missing CLIENT_ID/CLIENT_SECRET/REDIRECT_URI.");
+      return res
+        .status(400)
+        .send('Missing "code". Start at /login to initiate sign-in.');
     }
 
-    // Exchange code for tokens (Authorization Code, confidential client + PKCE)
-    const tokenUrl = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
+    // Validate state
+    const expectedState = readCookie(req, "oauth_state");
+    if (!state || !expectedState || state !== expectedState) {
+      return res.status(400).send("State mismatch. Start at /login.");
+    }
+
+    // PKCE verifier (we will include it, and ALSO include client_secret)
+    const code_verifier = readCookie(req, "pkce_verifier");
+    if (!code_verifier) {
+      return res.status(400).send("Missing PKCE verifier. Start at /login.");
+    }
+
+    if (!MS_CLIENT_ID || !MS_TENANT_ID || !APP_BASE_URL || !MS_CLIENT_SECRET) {
+      return res.status(500).send("Server missing required env vars.");
+    }
+
+    // Exchange code for tokens
+    const tokenUrl = `https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/token`;
     const body = new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
+      client_id: MS_CLIENT_ID,
+      client_secret: MS_CLIENT_SECRET,           // <-- always include
       grant_type: "authorization_code",
       code,
-      redirect_uri: REDIRECT_URI,
-      code_verifier: verifier
+      redirect_uri: `${APP_BASE_URL}/api/auth/callback`,
+      code_verifier,                             // <-- include PKCE too
     });
 
-    const tokenResp = await fetch(tokenUrl, {
+    const tokenRes = await fetch(tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body
+      body,
     });
 
-    const tokenJson = await tokenResp.json();
+    const tokenJson = await tokenRes.json();
 
-    if (!tokenResp.ok) {
-      // bubble full message for debugging
-      res.status(500).send(
-        `Token exchange failed (${tokenResp.status}). ${tokenJson.error}: ${tokenJson.error_description || ""}`
-      );
-      return;
+    if (!tokenRes.ok) {
+      const msg =
+        tokenJson.error_description ||
+        JSON.stringify(tokenJson, null, 2) ||
+        "Token exchange failed";
+      return res.status(400).send(`Token error: ${msg}`);
     }
 
-    // Set HttpOnly cookies so we can call Graph
-    const maxAge = Number(tokenJson.expires_in || 3600);
-    const cookies = [
-      `graph_access_token=${encodeURIComponent(tokenJson.access_token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`,
-      tokenJson.refresh_token
-        ? `graph_refresh_token=${encodeURIComponent(tokenJson.refresh_token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=1209600`
-        : undefined,
-      // clear the transient cookies
-      `pkce_verifier=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
-      `oauth_state=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`
-    ].filter(Boolean);
+    // Persist tokens in secure cookies
+    const {
+      access_token,
+      refresh_token,
+      expires_in = 3600,
+    } = tokenJson;
 
-    res.setHeader("Set-Cookie", cookies);
+    // Access token (~1 hour)
+    // Refresh token (longer; we'll use 30 days here)
+    res.setHeader("Set-Cookie", [
+      cookieStr("access_token", access_token, {
+        maxAge: Math.max(1, Number(expires_in)),
+      }),
+      cookieStr("refresh_token", refresh_token || "", {
+        maxAge: 60 * 60 * 24 * 30,
+      }),
+      cookieStr("session", "true", { maxAge: 60 * 60 * 24 * 7 }),
+      // clear short-lived setup cookies
+      cookieStr("pkce_verifier", "", { maxAge: 0 }),
+      cookieStr("oauth_state", "", { maxAge: 0 }),
+    ]);
 
-    // where to send the user after sign‑in
-    const nextUrl = readCookie(req, "post_login_redirect") || "/";
-    return res.redirect(nextUrl.includes("http") ? nextUrl : `${nextUrl}?login=success`);
+    // Back to home with success flag
+    return res.redirect(302, "/?login=success");
   } catch (err) {
-    res.status(500).send(`Callback failure: ${err?.message || String(err)}`);
+    console.error("callback error:", err);
+    return res.status(500).send("Callback failed.");
   }
 }
