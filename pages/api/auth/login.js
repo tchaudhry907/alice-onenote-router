@@ -1,44 +1,39 @@
-// pages/api/auth/login.js
 import crypto from "crypto";
 
-// Helpers
-function b64url(input) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-function sha256b64url(str) {
-  return b64url(crypto.createHash("sha256").update(str).digest());
-}
+const TENANT = process.env.MS_TENANT || "consumers";
+const CLIENT_ID = process.env.MS_CLIENT_ID;
+const REDIRECT_URI = process.env.REDIRECT_URI;
+const BASE = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`;
 
-export default async function handler(_req, res) {
-  // Stronger verifier length (PKCE spec: 43–128 chars). 64 bytes => 86 chars.
-  const code_verifier = b64url(crypto.randomBytes(64));
-  const code_challenge = sha256b64url(code_verifier);
+// The minimal scopes we need now (can grow later)
+const SCOPE = [
+  "openid",
+  "profile",
+  "offline_access",
+  "Notes.ReadWrite.All"
+].join(" ");
 
-  // Tie the flow together with a flowId and use it as state
-  const flowId = crypto.randomBytes(16).toString("hex");
-  const state = flowId;
+export default async function handler(req, res) {
+  if (!CLIENT_ID || !REDIRECT_URI) {
+    return res.status(500).send("Missing required environment variables.");
+  }
 
-  const cookieFlags = "Path=/; HttpOnly; Secure; SameSite=Lax";
+  // Fresh state each attempt
+  const state = crypto.randomUUID();
+
+  // Set state cookie
   res.setHeader("Set-Cookie", [
-    `pkce_verifier=${code_verifier}; ${cookieFlags}; Max-Age=300`,
-    `oauth_state=${state}; ${cookieFlags}; Max-Age=300`,
-    `flow=${flowId}; ${cookieFlags}; Max-Age=300`,
+    `state=${state}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900` // 15 min
   ]);
 
-  const params = new URLSearchParams({
-    client_id: process.env.MS_CLIENT_ID,
-    response_type: "code",
-    redirect_uri: `${process.env.APP_BASE_URL}/api/auth/callback`,
-    response_mode: "query",
-    scope: "openid profile offline_access User.Read Notes.ReadWrite.All",
-    code_challenge,
-    code_challenge_method: "S256",
-    state,
-  });
+  const url = new URL(BASE);
+  url.searchParams.set("client_id", CLIENT_ID);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("redirect_uri", REDIRECT_URI);
+  url.searchParams.set("response_mode", "query");
+  url.searchParams.set("scope", SCOPE);
+  url.searchParams.set("state", state);
+  url.searchParams.set("prompt", "select_account"); // clearer in testing
 
-  // IMPORTANT: this must be the same hostname as APP_BASE_URL so cookies are returned
-  const authUrl = `https://login.microsoftonline.com/${process.env.MS_TENANT}/oauth2/v2.0/authorize?${params}`;
-  res.redirect(authUrl);
+  return res.redirect(302, url.toString());
 }
