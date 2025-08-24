@@ -1,4 +1,4 @@
-// pages/api/auth/callback.js
+// pages/api/auth/callback.js.
 
 export default async function handler(req, res) {
   const { code, state, error, error_description } = req.query;
