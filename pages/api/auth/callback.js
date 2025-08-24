@@ -1,128 +1,84 @@
-// pages/api/auth/callback.js
-const {
-  MS_CLIENT_ID,
-  MS_CLIENT_SECRET,
-  MS_TENANT_ID,
-  APP_BASE_URL,
-} = process.env;
-
-function readCookie(req, name) {
-  const raw = req.headers.cookie || "";
-  return raw
-    .split(/; */)
-    .map(c => c.split("="))
-    .reduce((acc, [k, ...v]) => {
-      if (!k) return acc;
-      const key = decodeURIComponent(k.trim());
-      const val = decodeURIComponent((v.join("=") || "").trim());
-      acc[key] = val;
-      return acc;
-    }, {})[name];
-}
-
-function cookieStr(name, value, opts = {}) {
-  const {
-    httpOnly = true,
-    secure = true,
-    sameSite = "Lax",
-    path = "/",
-    maxAge,
-  } = opts;
-  const parts = [`${name}=${encodeURIComponent(value)}`];
-  if (maxAge) parts.push(`Max-Age=${maxAge}`);
-  if (path) parts.push(`Path=${path}`);
-  if (sameSite) parts.push(`SameSite=${sameSite}`);
-  if (secure) parts.push("Secure");
-  if (httpOnly) parts.push("HttpOnly");
-  return parts.join("; ");
-}
-
 export default async function handler(req, res) {
-  const { code, state, error, error_description } = req.query || {};
+  // Read query
+  const { code, state } = req.query || {};
 
-  try {
-    if (error) {
-      // surface auth error
-      return res
-        .status(400)
-        .send(`Auth error: ${error}; ${error_description || ""}`);
-    }
+  // Pull verifier/state from cookies
+  const cookieHeader = req.headers.cookie || '';
+  const cookieMap = Object.fromEntries(cookieHeader.split(';').map(c => {
+    const i = c.indexOf('=');
+    if (i === -1) return [c.trim(),''];
+    return [c.slice(0,i).trim(), decodeURIComponent(c.slice(i+1).trim())];
+  }));
 
-    if (!code) {
-      return res
-        .status(400)
-        .send('Missing "code". Start at /login to initiate sign-in.');
-    }
+  const gotState   = cookieMap['oauth_state'];
+  const verifier   = cookieMap['pkce_verifier'];
 
-    // Validate state
-    const expectedState = readCookie(req, "oauth_state");
-    if (!state || !expectedState || state !== expectedState) {
-      return res.status(400).send("State mismatch. Start at /login.");
-    }
+  const clearShort = [
+    'pkce_verifier=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
+    'oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  ];
 
-    // PKCE verifier (we will include it, and ALSO include client_secret)
-    const code_verifier = readCookie(req, "pkce_verifier");
-    if (!code_verifier) {
-      return res.status(400).send("Missing PKCE verifier. Start at /login.");
-    }
-
-    if (!MS_CLIENT_ID || !MS_TENANT_ID || !APP_BASE_URL || !MS_CLIENT_SECRET) {
-      return res.status(500).send("Server missing required env vars.");
-    }
-
-    // Exchange code for tokens
-    const tokenUrl = `https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/token`;
-    const body = new URLSearchParams({
-      client_id: MS_CLIENT_ID,
-      client_secret: MS_CLIENT_SECRET,           // <-- always include
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: `${APP_BASE_URL}/api/auth/callback`,
-      code_verifier,                             // <-- include PKCE too
-    });
-
-    const tokenRes = await fetch(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
-
-    const tokenJson = await tokenRes.json();
-
-    if (!tokenRes.ok) {
-      const msg =
-        tokenJson.error_description ||
-        JSON.stringify(tokenJson, null, 2) ||
-        "Token exchange failed";
-      return res.status(400).send(`Token error: ${msg}`);
-    }
-
-    // Persist tokens in secure cookies
-    const {
-      access_token,
-      refresh_token,
-      expires_in = 3600,
-    } = tokenJson;
-
-    // Access token (~1 hour)
-    // Refresh token (longer; we'll use 30 days here)
-    res.setHeader("Set-Cookie", [
-      cookieStr("access_token", access_token, {
-        maxAge: Math.max(1, Number(expires_in)),
-      }),
-      cookieStr("refresh_token", refresh_token || "", {
-        maxAge: 60 * 60 * 24 * 30,
-      }),
-      cookieStr("session", "true", { maxAge: 60 * 60 * 24 * 7 }),
-      // clear short-lived setup cookies
-      cookieStr("pkce_verifier", "", { maxAge: 0 }),
-      cookieStr("oauth_state", "", { maxAge: 0 }),
-    ]);
-
-    // Back to home with success flag
-    return res.redirect(302, "/?login=success");
-  } catch (err) {
-    console.error("callback error:", err);
-    return res.status(500).send("Callback failed.");
+  // State checks
+  if (!state || !gotState || state !== gotState) {
+    res.setHeader('Set-Cookie', clearShort);
+    return res.status(400).send('Invalid or missing state. Start at /api/auth/login');
   }
+  if (!code) {
+    res.setHeader('Set-Cookie', clearShort);
+    return res.status(400).send('Missing authorization code.');
+  }
+
+  const tenant      = process.env.MS_TENANT;
+  const clientId    = process.env.MS_CLIENT_ID;
+  const clientSecret= process.env.MS_CLIENT_SECRET; // optional
+  const redirectUri = process.env.REDIRECT_URI;
+
+  // Build token request
+  const form = new URLSearchParams({
+    client_id: clientId,
+    scope: ['openid','profile','offline_access','User.Read','Notes.ReadWrite'].join(' '),
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+    code
+  });
+
+  if (clientSecret) {
+    form.append('client_secret', clientSecret);
+  } else if (verifier) {
+    form.append('code_verifier', verifier);
+  } else {
+    res.setHeader('Set-Cookie', clearShort);
+    return res.status(400).send('Missing PKCE verifier. Start at /api/auth/login');
+  }
+
+  // Exchange
+  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/token`;
+  const rsp = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/x-www-form-urlencoded' },
+    body: form.toString()
+  });
+
+  const text = await rsp.text();
+  let payload;
+  try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+
+  if (!rsp.ok) {
+    // Clear temp cookies
+    res.setHeader('Set-Cookie', clearShort);
+    // Surface exact AAD error
+    const msg = payload.error_description || text || 'Token exchange failed';
+    return res.status(400).send(`Token error:\n${msg}`);
+  }
+
+  // ✅ Success: set a thin session marker (we’ll add token storage later)
+  const session = { ok: true, at: Date.now() };
+  const sessionCookie = `session=${encodeURIComponent(JSON.stringify(session))}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`;
+
+  // Clear temp cookies and set session
+  res.setHeader('Set-Cookie', [...clearShort, sessionCookie]);
+
+  // Back to home with a success hint
+  const base = process.env.APP_BASE_URL || '/';
+  return res.redirect(302, `${base}/?login=success`);
 }
