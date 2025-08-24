@@ -1,61 +1,90 @@
 // pages/api/auth/callback.js
+import fetch from "node-fetch";
 
-const TOKEN_BASE = 'https://login.microsoftonline.com';
+const TENANT = process.env.MS_TENANT_ID || process.env.MS_TENANT || "consumers";
+const CLIENT_ID = process.env.MS_CLIENT_ID;
+const CLIENT_SECRET = process.env.MS_CLIENT_SECRET;   // we ARE using a confidential client
+const REDIRECT_URI = process.env.REDIRECT_URI;
+
+function readCookie(req, name) {
+  const h = req.headers.cookie || "";
+  const map = Object.fromEntries(h.split(";").map(c => c.trim().split("=").map(decodeURIComponent)).filter(p => p[0]));
+  return map[name];
+}
 
 export default async function handler(req, res) {
   try {
-    const tenant = process.env.MS_TENANT || 'consumers';
-    const clientId = process.env.MS_CLIENT_ID;
-    const clientSecret = process.env.MS_CLIENT_SECRET;
-    const redirectUri = process.env.REDIRECT_URI;
+    if (req.method !== "GET") return res.status(405).send("Method not allowed");
 
-    if (!clientId || !clientSecret || !redirectUri) {
-      return res.status(500).send('Missing MS_CLIENT_ID, MS_CLIENT_SECRET, or REDIRECT_URI');
+    const { code, state, error, error_description } = req.query;
+
+    // if Azure sent back an error
+    if (error) {
+      return res.status(400).send(`Sign‑in error: ${error}: ${error_description || ""}`);
     }
 
-    const code = req.query.code;
+    // state / verifier from cookies
+    const expectedState = readCookie(req, "oauth_state");
+    const verifier = readCookie(req, "pkce_verifier");
+    if (!expectedState || state !== expectedState) {
+      return res.status(400).send("Invalid or missing state. Start at /api/auth/login");
+    }
     if (!code) {
-      return res.status(400).send('Missing "code". Start at /api/auth/login');
+      return res.status(400).send('Missing "code" on callback.');
+    }
+    if (!verifier) {
+      return res.status(400).send('Missing PKCE verifier. Start at /api/auth/login');
     }
 
-    const tokenUrl = `${TOKEN_BASE}/${tenant}/oauth2/v2.0/token`;
+    if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI) {
+      return res.status(500).send("Server is missing CLIENT_ID/CLIENT_SECRET/REDIRECT_URI.");
+    }
 
-    const form = new URLSearchParams();
-    form.set('client_id', clientId);
-    form.set('client_secret', clientSecret);
-    form.set('grant_type', 'authorization_code');
-    form.set('code', code);
-    form.set('redirect_uri', redirectUri);
-
-    const resp = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
+    // Exchange code for tokens (Authorization Code, confidential client + PKCE)
+    const tokenUrl = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
+    const body = new URLSearchParams({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: verifier
     });
 
-    const tokenJson = await resp.json();
+    const tokenResp = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    });
 
-    if (!resp.ok) {
-      const msg = tokenJson.error_description || JSON.stringify(tokenJson);
-      // Send you back to home with a readable error
-      const url = new URL(process.env.APP_BASE_URL);
-      url.searchParams.set('error', '1');
-      url.searchParams.set('message', msg.substring(0, 900));
-      res.writeHead(302, { Location: url.toString() });
-      return res.end();
+    const tokenJson = await tokenResp.json();
+
+    if (!tokenResp.ok) {
+      // bubble full message for debugging
+      res.status(500).send(
+        `Token exchange failed (${tokenResp.status}). ${tokenJson.error}: ${tokenJson.error_description || ""}`
+      );
+      return;
     }
 
-    // Minimal success page for now
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(`
-      <html><body>
-        <h2>Signed in ✔</h2>
-        <p>Scopes: <code>${tokenJson.scope || ''}</code></p>
-        <p><a href="/">Return to home</a></p>
-      </body></html>
-    `);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send('Callback failure');
+    // Set HttpOnly cookies so we can call Graph
+    const maxAge = Number(tokenJson.expires_in || 3600);
+    const cookies = [
+      `graph_access_token=${encodeURIComponent(tokenJson.access_token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`,
+      tokenJson.refresh_token
+        ? `graph_refresh_token=${encodeURIComponent(tokenJson.refresh_token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=1209600`
+        : undefined,
+      // clear the transient cookies
+      `pkce_verifier=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
+      `oauth_state=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`
+    ].filter(Boolean);
+
+    res.setHeader("Set-Cookie", cookies);
+
+    // where to send the user after sign‑in
+    const nextUrl = readCookie(req, "post_login_redirect") || "/";
+    return res.redirect(nextUrl.includes("http") ? nextUrl : `${nextUrl}?login=success`);
+  } catch (err) {
+    res.status(500).send(`Callback failure: ${err?.message || String(err)}`);
   }
 }
