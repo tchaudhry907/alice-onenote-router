@@ -1,16 +1,20 @@
-// pages/api/graph/me.js
 export default async function handler(req, res) {
-  const raw = req.cookies?.session;
-  if (!raw) return res.status(401).json({ error: "No session cookie found" });
+  const cookies = Object.fromEntries(
+    (req.headers.cookie || "").split(";").map(c => {
+      const [k, ...rest] = c.trim().split("=");
+      return [k, rest.join("=")];
+    }).filter(([k]) => k)
+  );
 
-  let session;
-  try { session = JSON.parse(raw); } catch { return res.status(400).json({ error: "Bad session cookie" }); }
-  const accessToken = session?.access_token;
-  if (!accessToken) return res.status(401).json({ error: "No access_token in session" });
+  const token = cookies.access_token;
+  if (!token) {
+    return res.status(401).json({ error: "No access_token cookie. Sign in first." });
+  }
 
-  const resp = await fetch("https://graph.microsoft.com/v1.0/me", {
-    headers: { Authorization: `Bearer ${accessToken}` }
+  const r = await fetch("https://graph.microsoft.com/v1.0/me", {
+    headers: { Authorization: `Bearer ${decodeURIComponent(token)}` }
   });
-  const json = await resp.json();
-  res.status(resp.ok ? 200 : 400).json(json);
+
+  const json = await r.json();
+  res.status(r.ok ? 200 : r.status).json(json);
 }
