@@ -1,34 +1,17 @@
 // pages/api/me.js
-function parseCookies(req) {
-  const header = req.headers.cookie || '';
-  return Object.fromEntries(
-    header.split(/; */).filter(Boolean).map((c) => {
-      const i = c.indexOf('=');
-      const k = decodeURIComponent(c.slice(0, i));
-      const v = decodeURIComponent(c.slice(i + 1));
-      return [k, v];
-    })
-  );
-}
+import fetch from "node-fetch";
 
 export default async function handler(req, res) {
-  try {
-    const cookies = parseCookies(req);
-    const token = cookies['session_access_token'];
-    if (!token) return res.status(401).json({ error: 'No session access token' });
+  const token = req.cookies?.graph_access_token;
+  if (!token) return res.status(401).json({ error: "No access token. Please sign in at /login." });
 
-    const graphRes = await fetch('https://graph.microsoft.com/v1.0/me', {
+  try {
+    const r = await fetch("https://graph.microsoft.com/v1.0/me", {
       headers: { Authorization: `Bearer ${token}` }
     });
-    const json = await graphRes.json();
-
-    if (!graphRes.ok) {
-      return res.status(500).json({ error: 'Graph call failed', details: json });
-    }
-
-    res.status(200).json(json);
+    const j = await r.json();
+    return res.status(r.ok ? 200 : 500).json(j);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'me endpoint error' });
+    return res.status(500).json({ error: e.message || String(e) });
   }
 }
