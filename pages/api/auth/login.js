@@ -1,21 +1,51 @@
-// pages/login.js
-export default function Login() {
-  return (
-    <main style={{ fontFamily: 'system-ui', maxWidth: 720, margin: '40px auto', lineHeight: 1.4 }}>
-      <h1>Alice OneNote Router</h1>
-      <p>This is the starting point for your OneNote integration.</p>
+// pages/api/auth/login.js
+import crypto from "crypto";
 
-      <h3>Quick actions</h3>
-      <ul>
-        <li><a href="/login">Refresh this page</a></li>
-        <li><a href="/api/auth/login">Start OAuth (API route)</a></li>
-        <li><a href="/api/hello">API health check</a></li>
-      </ul>
+function base64UrlEncode(buffer) {
+  return buffer.toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
-      <p style={{marginTop:24, color:'#666'}}>
-        Note: visiting <code>/api/auth/callback</code> directly will show an error. That endpoint is only used when Microsoft
-        redirects back after sign‑in.
-      </p>
-    </main>
+export default async function handler(req, res) {
+  // 1) Create PKCE verifier + challenge
+  const verifier = base64UrlEncode(crypto.randomBytes(32));
+  const challenge = base64UrlEncode(
+    crypto.createHash("sha256").update(verifier).digest()
   );
+
+  // 2) Store verifier in a short-lived, httpOnly, secure cookie
+  const cookie = [
+    `pkce_verifier=${verifier}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Secure",
+    "Max-Age=600" // 10 minutes
+  ].join("; ");
+  res.setHeader("Set-Cookie", cookie);
+
+  // 3) Build authorize URL
+  const tenant = process.env.MS_TENANT || "common";
+  const params = new URLSearchParams({
+    client_id: process.env.MS_CLIENT_ID,
+    response_type: "code",
+    redirect_uri: process.env.REDIRECT_URI,
+    response_mode: "query",
+    scope: [
+      "openid",
+      "profile",
+      "offline_access",
+      "User.Read",
+      "Notes.ReadWrite.All"
+    ].join(" "),
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
+
+  const authorizeUrl = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?${params.toString()}`;
+
+  // 4) Redirect to Microsoft
+  return res.redirect(authorizeUrl);
 }
