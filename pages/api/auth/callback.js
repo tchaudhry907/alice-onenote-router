@@ -1,102 +1,75 @@
 // pages/api/auth/callback.js
-// Lightweight callback handler: exchanges the code for tokens,
-// clears the PKCE cookie, drops a tiny "session" cookie, then
-// redirects to "/" with a success or error flag.
-// NOTE: This does not persist tokens yet.
 
-function setCookie(res, name, value, options = {}) {
-  const {
-    httpOnly = true,
-    secure = true,
-    sameSite = "lax",
-    path = "/",
-    maxAge, // seconds
-  } = options;
-
-  const parts = [`${name}=${value ?? ""}`];
-  if (maxAge !== undefined) parts.push(`Max-Age=${maxAge}`);
-  if (path) parts.push(`Path=${path}`);
-  if (sameSite) parts.push(`SameSite=${sameSite}`);
-  if (secure) parts.push(`Secure`);
-  if (httpOnly) parts.push(`HttpOnly`);
-
-  // support multiple Set-Cookie headers
-  const prev = res.getHeader("Set-Cookie");
-  if (prev) {
-    res.setHeader("Set-Cookie", Array.isArray(prev) ? [...prev, parts.join("; ")] : [prev, parts.join("; ")]);
-  } else {
-    res.setHeader("Set-Cookie", parts.join("; "));
-  }
-}
+const TOKEN_BASE = 'https://login.microsoftonline.com';
 
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).end("Method Not Allowed");
-  }
-
-  const { code, state, error, error_description } = req.query;
-
-  // If Microsoft sent an OAuth error back, surface it and bounce home
-  if (error) {
-    // clear pkce cookie if present
-    setCookie(res, "pkce_verifier", "", { maxAge: 0, httpOnly: true, path: "/" });
-    return res.redirect(`/?login=error&reason=${encodeURIComponent(error_description || error)}`);
-  }
-
-  // We require a code and the PKCE verifier cookie set by /api/auth/login
-  const verifier = req.cookies?.pkce_verifier;
-  if (!code || !verifier) {
-    // Missing verifier is the “PKCE verifier” message you were seeing earlier
-    return res.redirect("/api/auth/login?err=missing_verifier");
-  }
-
-  // Exchange the auth code for tokens at Azure
-  const body = new URLSearchParams({
-    client_id: process.env.MS_CLIENT_ID,
-    scope: "openid profile offline_access Notes.ReadWrite.All",
-    code,
-    redirect_uri: process.env.REDIRECT_URI, // e.g. https://<your-app>/api/auth/callback
-    grant_type: "authorization_code",
-    code_verifier: verifier,
-  });
-
-  // If you’re using a client secret (your screenshots show one), include it:
-  if (process.env.MS_CLIENT_SECRET && process.env.MS_CLIENT_SECRET !== "not-set") {
-    body.set("client_secret", process.env.MS_CLIENT_SECRET);
-  }
-
-  const tokenResp = await fetch(
-    `https://login.microsoftonline.com/${process.env.MS_TENANT}/oauth2/v2.0/token`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    }
-  );
-
-  let tokenData;
   try {
-    tokenData = await tokenResp.json();
+    const tenant = process.env.MS_TENANT || 'consumers';
+    const clientId = process.env.MS_CLIENT_ID;
+    const clientSecret = process.env.MS_CLIENT_SECRET || '';
+    const redirectUri = process.env.REDIRECT_URI;
+
+    const code = req.query.code;
+    if (!code) {
+      return res.status(400).send('Missing "code". Start at /api/auth/login');
+    }
+
+    const tokenUrl = `${TOKEN_BASE}/${tenant}/oauth2/v2.0/token`;
+
+    const form = new URLSearchParams();
+    form.set('client_id', clientId);
+    form.set('grant_type', 'authorization_code');
+    form.set('code', code);
+    form.set('redirect_uri', redirectUri);
+
+    if (clientSecret) {
+      // Confidential client: include secret, no PKCE required
+      form.set('client_secret', clientSecret);
+    } else {
+      // Public client with PKCE: need the verifier cookie
+      const cookie = (req.headers.cookie || '')
+        .split(';')
+        .map(c => c.trim())
+        .find(c => c.startsWith('pkce_verifier='));
+      if (!cookie) {
+        return res.status(400).send('Missing PKCE verifier. Start at /api/auth/login');
+      }
+      const verifier = decodeURIComponent(cookie.split('=')[1]);
+      form.set('code_verifier', verifier);
+
+      // Clear the cookie
+      res.setHeader('Set-Cookie', 'pkce_verifier=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0');
+    }
+
+    const resp = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    });
+
+    const tokenJson = await resp.json();
+
+    if (!resp.ok) {
+      const msg = tokenJson.error_description || JSON.stringify(tokenJson);
+      // show the error on the homepage (soft landing)
+      const url = new URL(process.env.APP_BASE_URL);
+      url.searchParams.set('error', '1');
+      url.searchParams.set('message', msg.substring(0, 900));
+      res.writeHead(302, { Location: url.toString() });
+      return res.end();
+    }
+
+    // Success — keep it simple for now: show a tiny success page.
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(`
+      <html><body>
+        <h2>Signed in ✔</h2>
+        <p>Access token received for scopes: <code>${tokenJson.scope || ''}</code></p>
+        <p><a href="/">Return to home</a></p>
+      </body></html>
+    `);
   } catch (e) {
-    // If Azure didn’t return JSON, treat as error
-    return res.redirect("/?login=error&reason=invalid_token_response");
+    console.error(e);
+    res.status(500).send('Callback failure');
   }
-
-  if (!tokenResp.ok || tokenData?.error) {
-    // Common cause: wrong tenant, wrong redirect URI, or missing client_secret
-    const msg = tokenData?.error_description || tokenData?.error || "token_exchange_failed";
-    // clear PKCE cookie to avoid stale verifier
-    setCookie(res, "pkce_verifier", "", { maxAge: 0, httpOnly: true, path: "/" });
-    return res.redirect(`/?login=error&reason=${encodeURIComponent(msg)}`);
-  }
-
-  // ---- Lightweight "you're logged in" cookie (no real token storage yet) ----
-  // DO NOT use this in production—just for your current flow confirmation.
-  setCookie(res, "session", "ok", { maxAge: 3600, httpOnly: true, path: "/" }); // 1 hour
-  // Clean up the PKCE cookie so it’s not reused
-  setCookie(res, "pkce_verifier", "", { maxAge: 0, httpOnly: true, path: "/" });
-
-  // Redirect back home (or wherever you want)
-  return res.redirect("/?login=success");
 }
