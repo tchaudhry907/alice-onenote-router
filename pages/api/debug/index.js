@@ -1,18 +1,28 @@
-// pages/debug/index.js
-export default function DebugHome() {
-  const base = "https://alice-onenote-router.vercel.app";
+import React from "react";
+
+export default function Debug() {
+  const link = (href, text) => (
+    <li style={{ margin: "6px 0" }}>
+      <a href={href}>{text}</a>
+    </li>
+  );
+
   return (
-    <main style={{fontFamily:"system-ui, -apple-system, Segoe UI, Roboto", padding:"24px", lineHeight:1.5}}>
-      <h1>Debug Tools</h1>
+    <main style={{ maxWidth: 760, margin: "40px auto", fontFamily: "system-ui" }}>
+      <h1>Debug tools</h1>
+      <p>Use these helpers while we finish the flow.</p>
+
       <ul>
-        <li><a href={`${base}/api/debug/cookies`}>View cookies (JSON)</a></li>
-        <li><a href={`${base}/api/debug/pkce`}>View PKCE (verifier → challenge)</a></li>
-        <li><a href={`${base}/api/debug/headers`}>View headers (JSON)</a></li>
-        <li><a href={`${base}/api/debug/session`}>View session (JSON)</a></li>
-        <li><a href={`${base}/api/debug/clear-cookies`}>Clear auth cookies</a></li>
-        <li><a href={`${base}/api/auth/login`}>Start sign-in</a></li>
-        <li><a href={`${base}/`}>Back to Home</a></li>
+        {link("/api/debug/show-cookies", "Show cookies (JSON)")}
+        {link("/api/debug/clear-cookies", "Clear session + state cookies")}
+        {link("/api/auth/login", "Start sign-in (client_secret flow)")}
+        {link("/", "Back home")}
       </ul>
+
+      <p style={{ marginTop: 24, color: "#555" }}>
+        Tip: run <code>/api/debug/clear-cookies</code> before each new sign‑in attempt so
+        you don’t reuse an old <code>state</code> cookie.
+      </p>
     </main>
   );
 }
