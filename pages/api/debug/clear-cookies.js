@@ -1,11 +1,15 @@
-// pages/api/debug/clear-cookies.js
-export default async function handler(_req, res) {
-  const expired = "Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
+function kill(name) {
+  // kill for all paths (Path=/) and cross‑site safety
+  return `${name}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+export default async function handler(req, res) {
   res.setHeader("Set-Cookie", [
-    `pkce_verifier=; ${expired}`,
-    `oauth_state=; ${expired}`,
-    `flow=; ${expired}`,
-    `session=; ${expired}`,
+    kill("state"),
+    kill("access_token"),
+    kill("refresh_token"),
+    kill("session_ok")
   ]);
-  res.status(200).send("Cleared pkce_verifier, oauth_state, flow, session.");
+  res.setHeader("Content-Type", "text/plain");
+  res.status(200).send("Cleared state, access_token, refresh_token, session_ok.");
 }
