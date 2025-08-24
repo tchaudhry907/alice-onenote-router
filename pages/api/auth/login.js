@@ -1,60 +1,82 @@
 // pages/api/auth/login.js
 import crypto from "crypto";
 
-const TENANT = process.env.MS_TENANT_ID || process.env.MS_TENANT || "consumers";
-const CLIENT_ID = process.env.MS_CLIENT_ID;
-const REDIRECT_URI = process.env.REDIRECT_URI;    // e.g. https://alice-onenote-router.vercel.app/api/auth/callback
-const APP_BASE_URL = process.env.APP_BASE_URL || ""; // optional, used for state return
+const {
+  MS_CLIENT_ID,
+  MS_TENANT_ID,
+  APP_BASE_URL,
+} = process.env;
 
-// build random string
-function randString(bytes = 32) {
-  return crypto.randomBytes(bytes).toString("base64url");
+function base64url(buffer) {
+  return buffer.toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
-// RFC7636 code challenge = base64url( SHA256(verifier) )
-function codeChallenge(verifier) {
-  const hash = crypto.createHash("sha256").update(verifier).digest();
-  return Buffer.from(hash).toString("base64url");
+
+function makeCookie(name, value, opts = {}) {
+  const {
+    httpOnly = true,
+    secure = true,
+    sameSite = "Lax",
+    path = "/",
+    maxAge, // seconds
+  } = opts;
+
+  const parts = [`${name}=${value}`];
+  if (maxAge) parts.push(`Max-Age=${maxAge}`);
+  if (path) parts.push(`Path=${path}`);
+  if (sameSite) parts.push(`SameSite=${sameSite}`);
+  if (secure) parts.push("Secure");
+  if (httpOnly) parts.push("HttpOnly");
+  return parts.join("; ");
 }
 
 export default async function handler(req, res) {
   try {
-    if (!CLIENT_ID || !REDIRECT_URI) {
-      res.status(500).json({ error: "Missing MS_CLIENT_ID or REDIRECT_URI env vars." });
-      return;
+    if (!MS_CLIENT_ID || !MS_TENANT_ID || !APP_BASE_URL) {
+      return res.status(500).json({ error: "Missing required env vars" });
     }
 
-    const verifier = randString(64);
-    const challenge = codeChallenge(verifier);
-    const state = randString(24);
+    // PKCE: create code_verifier & challenge
+    const verifierBytes = crypto.randomBytes(32);
+    const code_verifier = base64url(verifierBytes);
+    const code_challenge = base64url(
+      crypto.createHash("sha256").update(code_verifier).digest()
+    );
 
-    // Store verifier + state in short‑lived, HttpOnly cookies
+    // state for CSRF
+    const state = base64url(crypto.randomBytes(24));
+
+    // Store short-lived cookies (5 minutes)
     res.setHeader("Set-Cookie", [
-      `pkce_verifier=${verifier}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=300`,
-      `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=300`,
-      // also remember where to go after login (home by default)
-      `post_login_redirect=${encodeURIComponent(APP_BASE_URL || "/")}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=300`
+      makeCookie("pkce_verifier", code_verifier, { maxAge: 300 }),
+      makeCookie("oauth_state", state, { maxAge: 300 }),
     ]);
 
-    const params = new URLSearchParams({
-      client_id: CLIENT_ID,
-      response_type: "code",
-      redirect_uri: REDIRECT_URI,
-      response_mode: "query",
-      scope: [
-        "openid",
-        "profile",
-        "offline_access",
-        "User.Read",
-        "Notes.ReadWrite.All"
-      ].join(" "),
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      state
-    });
+    const scope = [
+      "openid",
+      "profile",
+      "offline_access",
+      "User.Read",
+      "Notes.ReadWrite.All",
+    ].join(" ");
 
-    const authorizeUrl = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize?${params.toString()}`;
-    return res.redirect(authorizeUrl);
+    const authorizeUrl = new URL(
+      `https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/authorize`
+    );
+    authorizeUrl.searchParams.set("client_id", MS_CLIENT_ID);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("redirect_uri", `${APP_BASE_URL}/api/auth/callback`);
+    authorizeUrl.searchParams.set("response_mode", "query");
+    authorizeUrl.searchParams.set("scope", scope);
+    authorizeUrl.searchParams.set("code_challenge", code_challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("state", state);
+
+    return res.redirect(authorizeUrl.toString());
   } catch (err) {
-    res.status(500).json({ error: err.message || String(err) });
+    console.error("login error:", err);
+    return res.status(500).json({ error: "Login init failed" });
   }
 }
