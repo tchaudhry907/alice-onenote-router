@@ -1,82 +1,50 @@
-// pages/api/auth/login.js
-import crypto from "crypto";
+import crypto from 'crypto';
 
-const {
-  MS_CLIENT_ID,
-  MS_TENANT_ID,
-  APP_BASE_URL,
-} = process.env;
-
-function base64url(buffer) {
-  return buffer.toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-}
-
-function makeCookie(name, value, opts = {}) {
-  const {
-    httpOnly = true,
-    secure = true,
-    sameSite = "Lax",
-    path = "/",
-    maxAge, // seconds
-  } = opts;
-
-  const parts = [`${name}=${value}`];
-  if (maxAge) parts.push(`Max-Age=${maxAge}`);
-  if (path) parts.push(`Path=${path}`);
-  if (sameSite) parts.push(`SameSite=${sameSite}`);
-  if (secure) parts.push("Secure");
-  if (httpOnly) parts.push("HttpOnly");
-  return parts.join("; ");
-}
+// base64url helpers
+const b64u = buf => Buffer.from(buf).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const sha256 = str => crypto.createHash('sha256').update(str).digest();
 
 export default async function handler(req, res) {
-  try {
-    if (!MS_CLIENT_ID || !MS_TENANT_ID || !APP_BASE_URL) {
-      return res.status(500).json({ error: "Missing required env vars" });
-    }
-
-    // PKCE: create code_verifier & challenge
-    const verifierBytes = crypto.randomBytes(32);
-    const code_verifier = base64url(verifierBytes);
-    const code_challenge = base64url(
-      crypto.createHash("sha256").update(code_verifier).digest()
-    );
-
-    // state for CSRF
-    const state = base64url(crypto.randomBytes(24));
-
-    // Store short-lived cookies (5 minutes)
-    res.setHeader("Set-Cookie", [
-      makeCookie("pkce_verifier", code_verifier, { maxAge: 300 }),
-      makeCookie("oauth_state", state, { maxAge: 300 }),
-    ]);
-
-    const scope = [
-      "openid",
-      "profile",
-      "offline_access",
-      "User.Read",
-      "Notes.ReadWrite.All",
-    ].join(" ");
-
-    const authorizeUrl = new URL(
-      `https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/authorize`
-    );
-    authorizeUrl.searchParams.set("client_id", MS_CLIENT_ID);
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("redirect_uri", `${APP_BASE_URL}/api/auth/callback`);
-    authorizeUrl.searchParams.set("response_mode", "query");
-    authorizeUrl.searchParams.set("scope", scope);
-    authorizeUrl.searchParams.set("code_challenge", code_challenge);
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-    authorizeUrl.searchParams.set("state", state);
-
-    return res.redirect(authorizeUrl.toString());
-  } catch (err) {
-    console.error("login error:", err);
-    return res.status(500).json({ error: "Login init failed" });
+  // REQUIRE vars (fail fast with explicit message)
+  const required = ['APP_BASE_URL','REDIRECT_URI','MS_CLIENT_ID','MS_TENANT','ENCRYPTION_SECRET'];
+  const missing = required.filter(k => !process.env[k]);
+  if (missing.length) {
+    return res.status(500).send(`Missing required environment variables: ${missing.join(', ')}`);
   }
+
+  // Prepare PKCE + state
+  const verifier = b64u(crypto.randomBytes(32));
+  const challenge = b64u(sha256(verifier));
+  const state = b64u(crypto.randomBytes(24));
+
+  const cookieFlags = 'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=300'; // 5 min
+
+  // Set cookies for callback verification
+  res.setHeader('Set-Cookie', [
+    `pkce_verifier=${verifier}; ${cookieFlags}`,
+    `oauth_state=${state}; ${cookieFlags}`
+  ]);
+
+  // Build authorize URL
+  const tenant = process.env.MS_TENANT;              // e.g. 'consumers'
+  const clientId = process.env.MS_CLIENT_ID;
+  const redirectUri = process.env.REDIRECT_URI;
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    response_mode: 'query',
+    scope: [
+      'openid','profile','offline_access',
+      'User.Read',        // baseline
+      'Notes.ReadWrite'   // OneNote scope
+    ].join(' '),
+    code_challenge_method: 'S256',
+    code_challenge: challenge,
+    state
+  });
+
+  const url = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize?${params.toString()}`;
+  return res.redirect(302, url);
 }
