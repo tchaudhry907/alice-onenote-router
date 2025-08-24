@@ -1,51 +1,60 @@
 // pages/api/auth/login.js
-import crypto from "crypto";
+import crypto from 'crypto';
 
-function base64UrlEncode(buffer) {
-  return buffer.toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+const AUTH_BASE = 'https://login.microsoftonline.com';
+
+function b64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 export default async function handler(req, res) {
-  // 1) Create PKCE verifier + challenge
-  const verifier = base64UrlEncode(crypto.randomBytes(32));
-  const challenge = base64UrlEncode(
-    crypto.createHash("sha256").update(verifier).digest()
-  );
+  try {
+    const tenant = process.env.MS_TENANT || 'consumers';
+    const clientId = process.env.MS_CLIENT_ID;
+    const redirectUri = process.env.REDIRECT_URI;
+    const haveSecret = !!process.env.MS_CLIENT_SECRET;
 
-  // 2) Store verifier in a short-lived, httpOnly, secure cookie
-  const cookie = [
-    `pkce_verifier=${verifier}`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Lax",
-    "Secure",
-    "Max-Age=600" // 10 minutes
-  ].join("; ");
-  res.setHeader("Set-Cookie", cookie);
+    if (!clientId || !redirectUri) {
+      res.status(500).send('Missing MS_CLIENT_ID or REDIRECT_URI');
+      return;
+    }
 
-  // 3) Build authorize URL
-  const tenant = process.env.MS_TENANT || "common";
-  const params = new URLSearchParams({
-    client_id: process.env.MS_CLIENT_ID,
-    response_type: "code",
-    redirect_uri: process.env.REDIRECT_URI,
-    response_mode: "query",
-    scope: [
-      "openid",
-      "profile",
-      "offline_access",
-      "User.Read",
-      "Notes.ReadWrite.All"
-    ].join(" "),
-    code_challenge: challenge,
-    code_challenge_method: "S256",
-  });
+    // Common scopes for Graph + offline access
+    const scopes = [
+      'openid', 'profile', 'email',
+      'offline_access',
+      // OneNote + basic Graph user info
+      'Notes.ReadWrite.All',
+      'User.Read'
+    ].join(' ');
 
-  const authorizeUrl = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?${params.toString()}`;
+    const authorize = new URL(`${AUTH_BASE}/${tenant}/oauth2/v2.0/authorize`);
+    authorize.searchParams.set('client_id', clientId);
+    authorize.searchParams.set('response_type', 'code');
+    authorize.searchParams.set('redirect_uri', redirectUri);
+    authorize.searchParams.set('response_mode', 'query');
+    authorize.searchParams.set('scope', scopes);
+    // Let user pick account each time (helps while testing)
+    authorize.searchParams.set('prompt', 'select_account');
 
-  // 4) Redirect to Microsoft
-  return res.redirect(authorizeUrl);
+    if (!haveSecret) {
+      // Public client (PKCE)
+      const verifier = b64url(crypto.randomBytes(32));
+      const challenge = b64url(crypto.createHash('sha256').update(verifier).digest());
+
+      // Short‑lived, httpOnly cookie with the verifier
+      res.setHeader('Set-Cookie', [
+        `pkce_verifier=${verifier}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=600`
+      ]);
+
+      authorize.searchParams.set('code_challenge_method', 'S256');
+      authorize.searchParams.set('code_challenge', challenge);
+    }
+
+    res.writeHead(302, { Location: authorize.toString() });
+    res.end();
+  } catch (e) {
+    console.error(e);
+    res.status(500).send('Login endpoint error');
+  }
 }
