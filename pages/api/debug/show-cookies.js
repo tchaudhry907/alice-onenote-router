@@ -1,28 +1,17 @@
-import React from "react";
-
-export default function Debug() {
-  const link = (href, text) => (
-    <li style={{ margin: "6px 0" }}>
-      <a href={href}>{text}</a>
-    </li>
-  );
-
-  return (
-    <main style={{ maxWidth: 760, margin: "40px auto", fontFamily: "system-ui" }}>
-      <h1>Debug tools</h1>
-      <p>Use these helpers while we finish the flow.</p>
-
-      <ul>
-        {link("/api/debug/show-cookies", "Show cookies (JSON)")}
-        {link("/api/debug/clear-cookies", "Clear session + state cookies")}
-        {link("/api/auth/login", "Start sign-in (client_secret flow)")}
-        {link("/", "Back home")}
-      </ul>
-
-      <p style={{ marginTop: 24, color: "#555" }}>
-        Tip: run <code>/api/debug/clear-cookies</code> before each new sign‑in attempt so
-        you don’t reuse an old <code>state</code> cookie.
-      </p>
-    </main>
-  );
+// pages/api/debug/show-cookies.js
+export default function handler(req, res) {
+  try {
+    const raw = req.headers.cookie || "";
+    const parsed = {};
+    raw.split(";").map(s => s.trim()).filter(Boolean).forEach(pair => {
+      const i = pair.indexOf("=");
+      const k = i >= 0 ? pair.slice(0, i) : pair;
+      const v = i >= 0 ? pair.slice(i + 1) : "";
+      parsed[k] = decodeURIComponent(v);
+    });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.status(200).end(JSON.stringify({ cookies: parsed }, null, 2));
+  } catch (e) {
+    res.status(200).end(JSON.stringify({ cookies: {}, note: "parse error", error: String(e) }));
+  }
 }
