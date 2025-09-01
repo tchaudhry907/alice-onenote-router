@@ -1,89 +1,90 @@
-// pages/api/graph/journal.js
-// Drops a page into your default Journal section (Inbox in AliceChatGPT).
-// Uses the reliable section endpoint (multipart) so it CANNOT detour to Quick Notes.
-//
-// Usage (GET for convenience in browser):
-//   /api/graph/journal?title=My%20Entry&body=Hello%20world
-// If title is omitted, it defaults to ISO date (e.g., 2025-09-01).
-//
-// Configuration:
-// - Prefer setting env var DEFAULT_SECTION_ID to your Inbox section id.
-// - Fallback: uses the known Inbox id for your account.
-//
-// Response: { created: { id, title, createdDateTime, link }, raw }
+// pages/journal.js
+// Simple UI to post diary entries to OneNote (AliceChatGPT → Inbox)
+// via /api/graph/journal-post (which you already added).
 
-const FALLBACK_SECTION_ID = "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // Inbox (AliceChatGPT)
+import { useState } from "react";
 
-export default async function handler(req, res) {
-  try {
-    const token = req.cookies?.access_token;
-    if (!token) return res.status(401).json({ error: "No access_token cookie. Visit /api/auth/login first." });
+export default function Journal() {
+  const [title, setTitle] = useState("");
+  const [body, setBody]   = useState("");
+  const [status, setStatus] = useState("");
+  const [resp, setResp]   = useState(null);
 
-    const sectionId = (process.env.DEFAULT_SECTION_ID || FALLBACK_SECTION_ID).trim();
-    if (!sectionId) return res.status(500).json({ error: "Missing DEFAULT_SECTION_ID and fallback." });
-
-    const title = cleanStr(req.query.title) || todayISO();
-    const body  = cleanStr(req.query.body)  || "—";
-
-    // Proper multipart body with CRLF and Presentation part
-    const boundary = "----alice_router_" + Math.random().toString(36).slice(2);
-    const html =
-`<!DOCTYPE html>
-<html>
-  <head><title>${escapeHtml(title)}</title></head>
-  <body>
-    <p>${escapeHtml(body)}</p>
-  </body>
-</html>`;
-
-    const multipart =
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="Presentation"\r\n` +
-      `Content-Type: text/html; charset=utf-8\r\n\r\n` +
-      html + `\r\n` +
-      `--${boundary}--\r\n`;
-
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(sectionId)}/pages`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${decodeURIComponent(token)}`,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        Accept: "application/json",
-      },
-      body: multipart,
-    });
-
-    const j = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: "Create failed", details: j });
-
-    return res.status(201).json({
-      created: {
-        id: j.id,
-        title: j.title,
-        createdDateTime: j.createdDateTime,
-        link: j?.links?.oneNoteClientUrl?.href || null,
-      },
-      raw: j,
-    });
-  } catch (e) {
-    return res.status(500).json({ error: String(e) });
+  async function onSubmit(e) {
+    e.preventDefault();
+    setStatus("Saving…");
+    setResp(null);
+    try {
+      const r = await fetch("/api/graph/journal-post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title.trim() || undefined, // if blank, API will use YYYY-MM-DD
+          body: body,
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        setStatus("Error");
+        setResp(j);
+        return;
+      }
+      setStatus("Saved ✓");
+      setResp(j);
+      setBody(""); // clear after success
+    } catch (err) {
+      setStatus("Network error");
+      setResp({ error: String(err) });
+    }
   }
-}
 
-function todayISO() {
-  const d = new Date();
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-function cleanStr(x) {
-  if (x == null) return "";
-  return String(x).trim();
-}
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+  return (
+    <main style={{maxWidth: 720, margin: "40px auto", padding: 20, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto"}}>
+      <h1>Journal → OneNote (Inbox)</h1>
+
+      <form onSubmit={onSubmit} style={{display:"grid", gap:12}}>
+        <label>
+          <div>Title (optional — defaults to today)</div>
+          <input
+            value={title}
+            onChange={e=>setTitle(e.target.value)}
+            placeholder="Daily Log 2025-09-01"
+            style={{width:"100%", padding:10, fontSize:16}}
+          />
+        </label>
+
+        <label>
+          <div>Body (required)</div>
+          <textarea
+            value={body}
+            onChange={e=>setBody(e.target.value)}
+            placeholder="Type your entry…"
+            rows={8}
+            style={{width:"100%", padding:10, fontSize:16}}
+            required
+          />
+        </label>
+
+        <button type="submit" style={{padding:"10px 14px", fontSize:16, cursor:"pointer"}}>Save to OneNote</button>
+      </form>
+
+      <div style={{marginTop:12, color:"#555"}}>{status}</div>
+
+      {resp && (
+        <pre style={{marginTop:16, background:"#f6f8fa", padding:12, borderRadius:8, overflow:"auto"}}>
+{JSON.stringify(resp, null, 2)}
+        </pre>
+      )}
+
+      <hr style={{margin:"24px 0"}} />
+
+      <div style={{display:"grid", gap:8}}>
+        <a href="/api/auth/login">Re-sign in (if 401)</a>
+        <a href="/api/debug/show-cookies">Show cookies (debug)</a>
+        <a href="/api/graph/pages?sectionId=0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585&top=25&select=id,title,createdDateTime,lastModifiedDateTime,contentUrl">
+          List recent Inbox pages
+        </a>
+      </div>
+    </main>
+  );
 }
