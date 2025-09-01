@@ -1,10 +1,10 @@
 // pages/api/graph/page-create-to-inbox.js
-// Creates a page in a named notebook+section (defaults to AliceChatGPT / Inbox),
-// resolving the *GUID* section id first, then using XHTML create.
+// Creates a page in a named notebook+section (defaults: AliceChatGPT / Inbox)
+// by resolving the section's true GUID, then using XHTML create with onenote-section-id.
 //
 // Usage (GET for convenience):
 //   /api/graph/page-create-to-inbox?notebook=AliceChatGPT&section=Inbox
-//     &title=Hello&body=Created%20via%20GUID%20flow
+//     &title=Hello&body=Created%20with%20GUID
 //
 // Returns: { created: { id, title, section, notebook, createdDateTime, link }, raw }
 
@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     const title    = String(req.query.title    || "Untitled from Router");
     const body     = String(req.query.body     || "No content provided");
 
-    // 1) Resolve section GUID by name + parent notebook name
+    // 1) Resolve section GUID via our helper (same deployment origin)
     const resolveUrl = new URL(`${originFromReq(req)}/api/graph/sections-by-name`);
     resolveUrl.searchParams.set("notebook", notebook);
     resolveUrl.searchParams.set("section", section);
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     const sectionGuid = j1.section.idGuid;
 
-    // 2) Build XHTML body
+    // 2) XHTML body
     const xhtml =
 `<!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en-US">
@@ -44,14 +44,14 @@ export default async function handler(req, res) {
   </body>
 </html>`;
 
-    // 3) Create page with the GUID section id
+    // 3) Create page with onenote-section-id = GUID
     const createResp = await fetch("https://graph.microsoft.com/v1.0/me/onenote/pages", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${decodeURIComponent(token)}`,
         "Content-Type": "application/xhtml+xml",
         Accept: "application/json",
-        "onenote-section-id": sectionGuid, // GUID form required
+        "onenote-section-id": sectionGuid,
       },
       body: xhtml,
     });
@@ -85,7 +85,6 @@ function escapeXml(s) {
 }
 
 function originFromReq(req) {
-  // build absolute origin from request headers (works on Vercel)
   const proto = (req.headers["x-forwarded-proto"] || "https").toString();
   const host  = (req.headers.host || "").toString();
   return `${proto}://${host}`;
