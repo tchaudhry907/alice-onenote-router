@@ -9,9 +9,13 @@ export default function handler(req, res) {
       const v = i >= 0 ? pair.slice(i + 1) : "";
       parsed[k] = decodeURIComponent(v);
     });
+    // Redact sensitive values
+    const mask = (v) => (v ? (v.length > 24 ? v.slice(0, 12) + "…redacted…" + v.slice(-8) : "***") : null);
+    if (parsed.access_token) parsed.access_token = mask(parsed.access_token);
+    if (parsed.refresh_token) parsed.refresh_token = mask(parsed.refresh_token);
+    if (parsed.id_token) parsed.id_token = mask(parsed.id_token);
+
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(200).end(JSON.stringify({ cookies: parsed }, null, 2));
   } catch (e) {
-    res.status(200).end(JSON.stringify({ cookies: {}, note: "parse error", error: String(e) }));
-  }
-}
+    res.status(200).end(JSON.stringify({ cookies: {}, note: "parse error", error:
