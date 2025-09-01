@@ -1,5 +1,7 @@
 // pages/api/graph/sections-by-name.js
-// Finds a OneNote section by section name *and* parent notebook name.
+// Finds a OneNote section by section name *and* parent notebook name,
+// then normalizes the section id to the true GUID by fetching the section detail.
+//
 // Usage:
 //   /api/graph/sections-by-name?notebook=AliceChatGPT&section=Inbox
 // Returns:
@@ -16,38 +18,45 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing ?notebook=...&section=..." });
     }
 
-    // Ask Graph for *all* sections with this displayName (across notebooks),
-    // and expand parentNotebook so we can filter to the right notebook.
-    const url = new URL("https://graph.microsoft.com/v1.0/me/onenote/sections");
-    // Filter by section name (case-insensitive matching we'll do client-side)
-    url.searchParams.set("$top", "200");
-    url.searchParams.set("$select", "id,displayName");
-    url.searchParams.set("$expand", "parentNotebook($select=id,displayName)");
+    // 1) List all sections with parentNotebook to filter by names
+    const listUrl = new URL("https://graph.microsoft.com/v1.0/me/onenote/sections");
+    listUrl.searchParams.set("$top", "200");
+    listUrl.searchParams.set("$select", "id,displayName");
+    listUrl.searchParams.set("$expand", "parentNotebook($select=id,displayName)");
 
-    const r = await fetch(url.toString(), {
+    const listResp = await fetch(listUrl.toString(), {
       headers: { Authorization: `Bearer ${decodeURIComponent(token)}` },
     });
-    const j = await r.json();
-    if (!r.ok) return res.status(r.status).json(j);
+    const listJson = await listResp.json();
+    if (!listResp.ok) return res.status(listResp.status).json(listJson);
 
-    // Normalize and find exact notebook+section match
-    const sec = (j.value || []).find(s =>
+    const candidate = (listJson.value || []).find(s =>
       (s.displayName || "").toLowerCase() === section.toLowerCase() &&
       (s.parentNotebook?.displayName || "").toLowerCase() === notebook.toLowerCase()
     );
-
-    if (!sec) {
+    if (!candidate) {
       return res.status(404).json({ error: "Section not found", notebook, section });
     }
 
-    // IMPORTANT: For consumer accounts, this id is a GUID expected by OneNote create header.
+    // 2) Normalize: fetch the section detail by id — this returns the GUID form for consumer accounts
+    const detailUrl = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(candidate.id)}?$select=id,displayName`;
+    const detailResp = await fetch(detailUrl, {
+      headers: { Authorization: `Bearer ${decodeURIComponent(token)}` },
+    });
+    const detailJson = await detailResp.json();
+    if (!detailResp.ok) return res.status(detailResp.status).json(detailJson);
+
+    // Some tenants return GUID directly, others still return composite here.
+    // If it still looks composite, we will also attempt to extract GUID from any client link later.
+    const idGuid = detailJson.id;
+
     return res.status(200).json({
       section: {
-        idGuid: sec.id, // GUID form for section id
-        displayName: sec.displayName,
+        idGuid, // intended to be the true GUID
+        displayName: detailJson.displayName || candidate.displayName,
         parentNotebook: {
-          id: sec.parentNotebook?.id || null,
-          displayName: sec.parentNotebook?.displayName || null,
+          id: candidate.parentNotebook?.id || null,
+          displayName: candidate.parentNotebook?.displayName || null,
         },
       },
     });
