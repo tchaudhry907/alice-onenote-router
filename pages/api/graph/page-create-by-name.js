@@ -1,83 +1,100 @@
 // pages/api/graph/page-create-by-name.js
+// Creates a OneNote page in a section resolved by notebook+section names,
+// using the XHTML create endpoint with the "onenote-section-id" header.
+// Usage (GET for convenience):
+//   /api/graph/page-create-by-name?notebook=AliceChatGPT&section=Inbox
+//     &title=Hello&body=Created%20via%20XHTML
+//
+// Returns: { created: { id, title, section, notebook, createdDateTime, link }, raw }
+
 export default async function handler(req, res) {
   try {
     const token = req.cookies?.access_token;
     if (!token) return res.status(401).json({ error: "No access_token cookie" });
 
-    const { notebook, section, title, body } = req.query;
-    if (!notebook || !section)
-      return res
-        .status(400)
-        .json({ error: "Missing required ?notebook=...&section=..." });
+    const notebook = String(req.query.notebook || "").trim();
+    const section  = String(req.query.section  || "").trim();
+    const title    = String(req.query.title    || "Untitled from Router");
+    const body     = String(req.query.body     || "No content provided");
 
-    // Step 1: find notebook ID by name
-    const nbResp = await fetch(
-      "https://graph.microsoft.com/v1.0/me/onenote/notebooks?$select=id,displayName",
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const nbJson = await nbResp.json();
-    if (!nbResp.ok) return res.status(nbResp.status).json(nbJson);
+    if (!notebook || !section) {
+      return res.status(400).json({ error: "Missing ?notebook=...&section=..." });
+    }
 
-    const nb = (nbJson.value || []).find(
-      (n) => n.displayName.toLowerCase() === notebook.toLowerCase()
+    // 1) Resolve notebook by name
+    const nbUrl = new URL("https://graph.microsoft.com/v1.0/me/onenote/notebooks");
+    nbUrl.searchParams.set("$top", "100");
+    nbUrl.searchParams.set("$select", "id,displayName");
+
+    let r = await fetch(nbUrl.toString(), {
+      headers: { Authorization: `Bearer ${decodeURIComponent(token)}` },
+    });
+    let j = await r.json();
+    if (!r.ok) return res.status(r.status).json(j);
+
+    const nb = (j.value || []).find(
+      n => (n.displayName || "").toLowerCase() === notebook.toLowerCase()
     );
     if (!nb) return res.status(404).json({ error: `Notebook not found: ${notebook}` });
 
-    // Step 2: find section ID by name
-    const secResp = await fetch(
-      `https://graph.microsoft.com/v1.0/me/onenote/notebooks/${encodeURIComponent(
-        nb.id
-      )}/sections?$select=id,displayName`,
-      { headers: { Authorization: `Bearer ${token}` } }
+    // 2) Resolve section by name
+    const secUrl = new URL(
+      `https://graph.microsoft.com/v1.0/me/onenote/notebooks/${encodeURIComponent(nb.id)}/sections`
     );
-    const secJson = await secResp.json();
-    if (!secResp.ok) return res.status(secResp.status).json(secJson);
+    secUrl.searchParams.set("$select", "id,displayName");
 
-    const sec = (secJson.value || []).find(
-      (s) => s.displayName.toLowerCase() === section.toLowerCase()
+    r = await fetch(secUrl.toString(), {
+      headers: { Authorization: `Bearer ${decodeURIComponent(token)}` },
+    });
+    j = await r.json();
+    if (!r.ok) return res.status(r.status).json(j);
+
+    const sec = (j.value || []).find(
+      s => (s.displayName || "").toLowerCase() === section.toLowerCase()
     );
     if (!sec) return res.status(404).json({ error: `Section not found: ${section}` });
 
-    // Step 3: build XHTML page body
-    const html = `<!DOCTYPE html>
+    // 3) Build XHTML body
+    const xhtml =
+`<!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en-US">
   <head>
-    <title>${escapeXml(title || "Untitled from Router")}</title>
+    <title>${escapeXml(title)}</title>
     <meta name="created" content="${new Date().toISOString()}" />
   </head>
   <body>
-    <p>${escapeXml(body || "No content provided")}</p>
+    <p>${escapeXml(body)}</p>
   </body>
 </html>`;
 
-    // Step 4: POST create page
-    const r = await fetch("https://graph.microsoft.com/v1.0/me/onenote/pages", {
+    // 4) POST create page (XHTML + onenote-section-id header)
+    r = await fetch("https://graph.microsoft.com/v1.0/me/onenote/pages", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${decodeURIComponent(token)}`,
         "Content-Type": "application/xhtml+xml",
         Accept: "application/json",
-        "onenote-section-id": sec.id,
+        "onenote-section-id": sec.id, // critical: place into specific section
       },
-      body: html,
+      body: xhtml,
     });
 
-    const j = await r.json();
-    if (!r.ok) return res.status(r.status).json(j);
+    const created = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: "Create failed", details: created });
 
     return res.status(201).json({
       created: {
-        id: j.id,
-        title: j.title,
+        id: created.id,
+        title: created.title,
         section: sec.displayName,
         notebook: nb.displayName,
-        createdDateTime: j.createdDateTime,
-        link: j.links?.oneNoteClientUrl?.href || null,
+        createdDateTime: created.createdDateTime,
+        link: created?.links?.oneNoteClientUrl?.href || null,
       },
-      raw: j,
+      raw: created,
     });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: String(e) });
   }
 }
 
