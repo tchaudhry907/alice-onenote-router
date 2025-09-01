@@ -1,9 +1,9 @@
 // pages/api/graph/sections-create-batch.js
-// Creates your full OneNote section skeleton if missing.
+// Creates your OneNote section skeleton, sanitizing names for Graph.
 // Usage:
 //   /api/graph/sections-create-batch?notebookId=YOUR_NOTEBOOK_ID
 //
-// Returns JSON with created[] and skipped[].
+// Returns { created[], skipped[], nameMap[] }
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
@@ -52,6 +52,25 @@ async function gcollect(token, firstUrl) {
   return all;
 }
 
+// Sanitize section names for OneNote (Graph error 20153)
+/*
+Forbidden chars per Graph error:
+  ? * \ / : < > | & # ' % ~
+We also normalize:
+  "&" -> "and"
+  "/" -> " - "
+*/
+function sanitizeName(name) {
+  let out = name.replace(/&/g, "and").replace(/\//g, " - ");
+  // remove the rest of forbidden chars
+  out = out.replace(/[?*\\/:<>|&#'%~]/g, "");
+  // collapse spaces, trim
+  out = out.replace(/\s+/g, " ").trim();
+  // guard against empty result
+  if (!out) out = "Untitled";
+  return out;
+}
+
 export default async function handler(req, res) {
   try {
     const token = getAccessTokenFromCookie(req);
@@ -60,8 +79,8 @@ export default async function handler(req, res) {
     const notebookId = String(req.query.notebookId || "").trim();
     if (!notebookId) return send(res, 400, { error: "Missing notebookId" });
 
-    // === Desired skeleton ===
-    // We’re using simple section names (flat). The “/” is just part of the display name.
+    // Desired skeleton (human-friendly labels).
+    // NOTE: We'll sanitize before creation.
     const desired = [
       // Journal & Inbox
       "Journal",
@@ -95,35 +114,65 @@ export default async function handler(req, res) {
       "Lifestyle & Wardrobe / Closet & Outfits",
       "Lifestyle & Wardrobe / Shopping List",
 
-      // Archive (safe destination for cleanup moves)
+      // Archive
       "Archive"
     ];
 
-    // Fetch all existing sections
+    // Fetch existing sections (sanitized comparison)
     const sectionsUrl = `${GRAPH}/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections?$select=id,displayName&$top=100`;
     const existing = await gcollect(token, sectionsUrl);
-    const existingNamesLower = new Set(
-      existing.map(s => (s.displayName || "").toLowerCase())
-    );
+    const existingSanitized = new Map(); // sanitizedName -> { id, displayName }
+    for (const s of existing) {
+      existingSanitized.set(sanitizeName(s.displayName || ""), { id: s.id, displayName: s.displayName });
+    }
 
     const created = [];
     const skipped = [];
+    const nameMap = []; // { desired, createdName }
 
-    for (const name of desired) {
-      if (existingNamesLower.has(name.toLowerCase())) {
-        skipped.push(name);
+    // Track used sanitized names to avoid collisions within this run
+    const usedSanitized = new Set(existingSanitized.keys());
+
+    for (const rawName of desired) {
+      let san = sanitizeName(rawName);
+
+      // If sanitized collides, append a suffix
+      let attempt = san;
+      let n = 2;
+      while (usedSanitized.has(attempt.toLowerCase())) {
+        // If exact display already exists with same semantics, treat as skipped
+        const existingEntry = existingSanitized.get(attempt) || existingSanitized.get(attempt.toLowerCase());
+        if (existingEntry) {
+          skipped.push(existingEntry.displayName || attempt);
+          nameMap.push({ desired: rawName, createdName: existingEntry.displayName || attempt, reason: "already-exists" });
+          attempt = null;
+          break;
+        }
+        attempt = `${san} ${n++}`;
+      }
+      if (attempt === null) continue;
+
+      san = attempt;
+      // If a matching (sanitized) already exists from earlier not caught above, skip
+      if (existingSanitized.has(san) || existingSanitized.has(san.toLowerCase())) {
+        skipped.push(san);
+        nameMap.push({ desired: rawName, createdName: san, reason: "already-exists" });
         continue;
       }
+
+      // Create
       const createdSection = await gjson(
         token,
         `${GRAPH}/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ displayName: name })
+          body: JSON.stringify({ displayName: san })
         }
       );
-      created.push({ name, id: createdSection.id });
+      created.push({ name: san, id: createdSection.id });
+      usedSanitized.add(san.toLowerCase());
+      nameMap.push({ desired: rawName, createdName: san, id: createdSection.id, reason: "created" });
     }
 
     return send(res, 200, {
@@ -131,7 +180,8 @@ export default async function handler(req, res) {
       createdCount: created.length,
       skippedCount: skipped.length,
       created,
-      skipped
+      skipped,
+      nameMap
     });
   } catch (err) {
     return send(res, 500, { error: String(err && err.message || err) });
