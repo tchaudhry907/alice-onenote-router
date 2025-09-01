@@ -1,6 +1,4 @@
-// pages/api/ingest.js
-// Ingests freeform text into OneNote (defaults: AliceChatGPT -> Inbox).
-
+// pages/api/graph/archive-pages.js
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
 function send(res, code, data) {
@@ -9,9 +7,7 @@ function send(res, code, data) {
 }
 
 function getAccessTokenFromCookie(req) {
-  // You already set these in your flow; reuse the same cookie we use elsewhere.
   const hdr = req.headers.cookie || "";
-  // crude parse
   const map = Object.fromEntries(
     hdr.split(";").map(s => s.trim()).filter(Boolean).map(pair => {
       const i = pair.indexOf("=");
@@ -21,139 +17,119 @@ function getAccessTokenFromCookie(req) {
   return map["access_token"] || null;
 }
 
-async function gfetch(token, path, init = {}) {
-  const res = await fetch(`${GRAPH}${path}`, {
+async function g(token, url, init = {}) {
+  const res = await fetch(url, {
     ...init,
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Accept": "application/json",
-      ...(init.headers || {})
-    }
+    headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json", ...(init.headers || {}) }
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Graph ${res.status} on ${path}: ${text}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Graph ${res.status} ${url} -> ${txt}`);
   }
-  return res.json();
+  return res;
 }
 
-async function findNotebookId(token, name = "AliceChatGPT") {
-  const data = await gfetch(token, `/me/onenote/notebooks?$select=id,displayName&$top=200`);
-  const hit = (data.value || []).find(n => (n.displayName || "").toLowerCase() === name.toLowerCase());
-  return hit ? hit.id : null;
+async function gjson(token, url, init = {}) {
+  const r = await g(token, url, init);
+  return r.status === 204 ? {} : r.json();
 }
 
-async function findSectionIdInNotebook(token, notebookId, sectionName = "Inbox") {
-  const data = await gfetch(token, `/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections?$select=id,displayName&$top=200`);
-  const hit = (data.value || []).find(s => (s.displayName || "").toLowerCase() === sectionName.toLowerCase());
-  return hit ? hit.id : null;
+// Paged fetch helper
+async function gcollect(token, firstUrl) {
+  let url = firstUrl;
+  const all = [];
+  while (url) {
+    const data = await gjson(token, url);
+    if (Array.isArray(data.value)) all.push(...data.value);
+    url = data["@odata.nextLink"] || null;
+  }
+  return all;
 }
 
-function buildMultipartHTML({ title, body }) {
-  // Minimal valid OneNote HTML presentation
-  return `<!DOCTYPE html>
-<html>
-  <head>
-    <title>${escapeHtml(title || "Untitled")}</title>
-    <meta name="created" content="${new Date().toISOString()}" />
-  </head>
-  <body>
-    <h1>${escapeHtml(title || "")}</h1>
-    <p>${escapeHtml(body || "")}</p>
-  </body>
-</html>`;
+async function findSectionByName(token, notebookId, displayName) {
+  const url = `${GRAPH}/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections?$select=id,displayName&$top=100`;
+  const sections = await gcollect(token, url);
+  const hit = sections.find(s => (s.displayName || "").toLowerCase() === displayName.toLowerCase());
+  return hit ? { id: hit.id, name: hit.displayName } : null;
 }
 
-function escapeHtml(s) {
-  return String(s || "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function buildMultipartBody(html) {
-  const boundary = `--------------------------${Math.random().toString(16).slice(2)}`;
-  const parts = [];
-  parts.push(`--${boundary}\r\n` +
-             `Content-Disposition: form-data; name="Presentation"\r\n` +
-             `Content-Type: text/html\r\n\r\n` +
-             `${html}\r\n`);
-  parts.push(`--${boundary}--\r\n`);
-  const blob = new Blob(parts, { type: `multipart/form-data; boundary=${boundary}` });
-  return { body: blob, boundary };
+async function ensureArchive(token, notebookId) {
+  let arch = await findSectionByName(token, notebookId, "Archive");
+  if (arch) return arch;
+  const created = await gjson(
+    token,
+    `${GRAPH}/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "Archive" })
+    }
+  );
+  return { id: created.id, name: created.displayName };
 }
 
 export default async function handler(req, res) {
   try {
-    // Accept POST (JSON) or GET (query) for quick testing.
-    const method = req.method || "GET";
-    const params = method === "POST" ? (req.body || {}) : (req.query || {});
-
-    let {
-      title,            // optional; defaults to "Daily Log YYYY-MM-DD"
-      body,             // required
-      sectionName,      // defaults to "Inbox"
-      notebookName,     // defaults to "AliceChatGPT"
-      notebookId,       // optional override
-      sectionId         // optional override
-    } = params;
-
     const token = getAccessTokenFromCookie(req);
     if (!token) return send(res, 401, { error: "No access_token cookie" });
 
-    if (!body || String(body).trim().length === 0) {
-      return send(res, 400, { error: "Missing 'body' text" });
+    const notebookId = String(req.query.notebookId || "").trim();
+    const sectionName = String(req.query.sectionName || "Inbox").trim();
+    const olderThanDays = parseInt(String(req.query.olderThanDays || "30"), 10);
+    const dryRun = String(req.query.dryRun || "false").toLowerCase() === "true";
+    if (!notebookId) return send(res, 400, { error: "Missing notebookId" });
+
+    const source = await findSectionByName(token, notebookId, sectionName);
+    if (!source) return send(res, 404, { error: `Section '${sectionName}' not found` });
+
+    const cutoffISO = new Date(Date.now() - olderThanDays * 24 * 3600 * 1000).toISOString();
+
+    // Get *all* pages (paged, $top=100)
+    const pagesUrl = `${GRAPH}/me/onenote/sections/${encodeURIComponent(source.id)}/pages?$select=id,title,createdDateTime,lastModifiedDateTime&$top=100`;
+    const pages = await gcollect(token, pagesUrl);
+    const oldPages = pages.filter(p => (p.createdDateTime || "") < cutoffISO);
+
+    if (dryRun) {
+      return send(res, 200, {
+        mode: "dryRun",
+        section: source,
+        olderThanDays,
+        cutoffISO,
+        count: oldPages.length,
+        pages: oldPages.slice(0, 25).map(p => ({ id: p.id, title: p.title, created: p.createdDateTime }))
+      });
     }
 
-    const today = new Date().toISOString().slice(0, 10);
-    title = title && String(title).trim().length ? String(title) : `Daily Log ${today}`;
-    notebookName = notebookName || "AliceChatGPT";
-    sectionName = sectionName || "Inbox";
-
-    // Resolve notebook/section if not provided
-    if (!notebookId) {
-      notebookId = await findNotebookId(token, notebookName);
-      if (!notebookId) return send(res, 404, { error: `Notebook '${notebookName}' not found` });
-    }
-    if (!sectionId) {
-      sectionId = await findSectionIdInNotebook(token, notebookId, sectionName);
-      if (!sectionId) return send(res, 404, { error: `Section '${sectionName}' not found in notebook '${notebookName}'` });
+    if (oldPages.length === 0) {
+      return send(res, 200, { info: "Nothing to archive", section: source, olderThanDays, cutoffISO });
     }
 
-    // Build content
-    const html = buildMultipartHTML({ title, body });
-    const { body: mpBody, boundary } = buildMultipartBody(html);
+    const archive = await ensureArchive(token, notebookId);
+    const moved = [];
+    const failed = [];
 
-    // Create the page under the section
-    const postUrl = `/me/onenote/sections/${encodeURIComponent(sectionId)}/pages`;
-    const created = await fetch(`${GRAPH}${postUrl}`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Accept": "application/json",
-        "Content-Type": `multipart/form-data; boundary=${boundary}`
-      },
-      body: mpBody
-    });
-
-    if (!created.ok) {
-      const errTxt = await created.text().catch(() => "");
-      return send(res, created.status, { error: "Create failed", details: errTxt });
+    for (const p of oldPages) {
+      try {
+        // Copy to Archive
+        await gjson(token, `${GRAPH}/me/onenote/pages/${encodeURIComponent(p.id)}/copyToSection`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: archive.id })
+        });
+        // Delete original
+        await g(token, `${GRAPH}/me/onenote/pages/${encodeURIComponent(p.id)}`, { method: "DELETE" });
+        moved.push({ id: p.id, title: p.title, created: p.createdDateTime });
+      } catch (e) {
+        failed.push({ id: p.id, title: p.title, error: String(e && e.message || e) });
+      }
     }
-
-    const raw = await created.json();
-    const link = raw?.links?.oneNoteClientUrl?.href || raw?.links?.oneNoteWebUrl?.href || null;
 
     return send(res, 200, {
-      created: {
-        id: raw.id,
-        title: raw.title,
-        section: sectionName,
-        notebook: notebookName,
-        createdDateTime: raw.createdDateTime,
-        link
-      },
-      raw
+      archivedTo: archive,
+      movedCount: moved.length,
+      moved,
+      failedCount: failed.length,
+      failed
     });
   } catch (err) {
     return send(res, 500, { error: String(err && err.message || err) });
