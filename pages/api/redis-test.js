@@ -1,23 +1,18 @@
 // pages/api/redis-test.js
-import { getRedis } from "../../lib/redis";
+import { Redis } from "@upstash/redis";
+
+const redis = Redis.fromEnv(); // requires UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel env
 
 export default async function handler(req, res) {
   try {
-    const redis = getRedis();
+    const key = "alice:test";
+    const now = new Date().toISOString();
 
-    // Write a test key
-    await redis.set("alice:test", "Hello from Redis!");
+    await redis.set(key, now);
+    const value = await redis.get(key);
 
-    // Read it back
-    const value = await redis.get("alice:test");
-
-    res.status(200).json({
-      ok: true,
-      wrote: "alice:test",
-      value,
-    });
+    res.status(200).json({ ok: true, wrote: now, read: value });
   } catch (err) {
-    console.error("Redis test error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 }
