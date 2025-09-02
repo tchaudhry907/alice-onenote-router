@@ -14,7 +14,7 @@
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "node-fetch": "3.3.2",
-    "@upstash/redis": "^1.28.3"
+    "@upstash/redis": "1.28.3"
   },
   "devDependencies": {
     "eslint": "8.57.0"
