@@ -2,15 +2,19 @@
   "name": "alice-onenote-router",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start"
   },
   "dependencies": {
-    "next": "13.5.6",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
-    "@upstash/redis": "^1.20.6"
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "node-fetch": "3.3.2"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
