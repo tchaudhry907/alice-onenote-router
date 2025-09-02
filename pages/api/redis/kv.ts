@@ -1,6 +1,8 @@
 // pages/api/redis/kv.ts
-import type { NextApiRequest, NextApiResponse } from 'next';
-
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  res.status(200).json({ message: "Redis KV API is working" });
+export default function handler(req, res) {
+  res.status(200).json({
+    ok: true,
+    route: "/api/redis/kv",
+    note: "minimal test handler (no Redis yet)"
+  });
 }
