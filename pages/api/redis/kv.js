@@ -1,10 +1,8 @@
-// pages/api/redis/kv.js
-export default async function handler(req, res) {
-  // Minimal, dependency-free handler so Vercel definitely picks it up
+// pages/api/redis/redis.ts
+export default function handler(req, res) {
   res.status(200).json({
     ok: true,
-    route: "/api/redis/kv",
-    method: req.method,
-    ts: new Date().toISOString(),
+    route: "/api/redis/redis",
+    note: "minimal test handler (no Redis yet)"
   });
 }
