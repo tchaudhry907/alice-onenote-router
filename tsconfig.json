@@ -1,29 +1,13 @@
 {
   "compilerOptions": {
-    "allowJs": true,
-    "checkJs": false,
-    "skipLibCheck": true,
-
-    // --- alias setup (Next reads this when tsconfig.json exists) ---
     "baseUrl": ".",
-    "paths": {
-      "@/*": ["*"]
-    },
-
-    // Keep what Next expects so it stops rewriting this file:
-    "module": "esnext",
-    "moduleResolution": "node",
-    "jsx": "preserve",
-    "esModuleInterop": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
+    "paths": { "@/*": ["*"] },
+    "allowJs": true,
+    "skipLibCheck": true,
     "strict": false,
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "incremental": true
+    "noEmit": true,
+    "jsx": "preserve"
   },
-
-  // Include JS so editors/types don’t get confused; TS isn’t required
-  "include": ["next-env.d.ts", "**/*.js", "**/*.jsx"],
+  "include": ["**/*.js"],
   "exclude": ["node_modules"]
 }
