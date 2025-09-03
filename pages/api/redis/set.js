@@ -1,4 +1,4 @@
-import { kv } from "@/lib/kv";
+import { set as kvSet } from "@/lib/kv";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -7,12 +7,14 @@ export default async function handler(req, res) {
 
   try {
     const { key, value, ttl } = req.body;
-    if (!key) return res.status(400).json({ ok: false, error: "Missing key" });
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "Missing key" });
+    }
 
     if (ttl) {
-      await kv.set(key, value, { ex: Number(ttl) });
+      await kvSet(key, value ?? null, ttl);
     } else {
-      await kv.set(key, value);
+      await kvSet(key, value ?? null);
     }
 
     res.status(200).json({ ok: true });
