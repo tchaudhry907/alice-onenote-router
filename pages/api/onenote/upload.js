@@ -6,9 +6,7 @@ import { getTokenCookie } from "@/lib/cookie";
 import { kv } from "@/lib/kv";
 import { refreshAccessToken } from "@/lib/graph";
 
-export const config = {
-  api: { bodyParser: false } // we handle multipart
-};
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
   try {
@@ -23,22 +21,23 @@ export default async function handler(req, res) {
     const refreshToken = await kv.get(tok.key);
     if (!refreshToken) return res.status(401).json({ ok: false, error: "Session expired. Sign in again." });
 
-    // 2) Parse multipart and PERSIST files to /tmp
+    // 2) Parse form and persist files to /tmp
     const { fields, files } = await parseFormToTmp(req);
 
     const title = (fields.title || "Uploaded via Alice Router").toString();
     const bodyHtml = (fields.body || "<p>(no body)</p>").toString();
 
-    const fileEntries = Object.values(files || {});
+    // 🔧 Flatten files: values can be File OR File[]
+    const fileEntries = Object.values(files || {}).flatMap(v => Array.isArray(v) ? v : [v]).filter(Boolean);
     if (!fileEntries.length) throw new Error("No files uploaded");
 
-    // 3) Build XHTML body that references the attachments
+    // 3) XHTML with attachment objects
     const xhtml = makeXHTML(title, bodyHtml, fileEntries);
 
     // 4) Read file buffers from /tmp
     const prepFiles = await Promise.all(
       fileEntries.map(async (f, idx) => {
-        const filepath = f.filepath || f.path;
+        const filepath = f.filepath || f.path; // formidable v3 uses .filepath
         if (!filepath) throw new Error("File missing filepath (upload dir not set?)");
         const buffer = await fs.readFile(filepath);
         return {
@@ -82,11 +81,11 @@ export default async function handler(req, res) {
 }
 
 function makeXHTML(title, bodyHtml, fileEntries) {
-  const attachmentTags = fileEntries
+  const attachmentTags = (fileEntries || [])
     .map((f, i) => {
       const name = `file${i + 1}`;
-      const filename = (f.originalFilename || `attachment-${i + 1}`).replace(/"/g, "");
-      const type = f.mimetype || "application/octet-stream";
+      const filename = (f?.originalFilename || `attachment-${i + 1}`).replace(/"/g, "");
+      const type = f?.mimetype || "application/octet-stream";
       return `<p><object data-attachment="${escapeHtml(filename)}" data="name:${name}" type="${escapeHtml(type)}" /></p>`;
     })
     .join("\n");
@@ -110,7 +109,7 @@ function escapeHtml(s) {
     .replace(/"/g,"&quot;");
 }
 
-// Force Formidable to save files to /tmp (writable on Vercel)
+// Save uploads to /tmp so we always have a .filepath on Vercel
 function parseFormToTmp(req) {
   const form = new IncomingForm({
     multiples: true,
