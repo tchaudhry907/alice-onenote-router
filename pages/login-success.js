@@ -1,18 +1,23 @@
 // pages/login-success.js
+import { useEffect } from "react";
+
 export default function LoginSuccess() {
+  useEffect(() => {
+    // small delay to make sure cookie is written before redirect
+    const id = setTimeout(() => {
+      window.location.replace("/api/ok");
+    }, 200);
+    return () => clearTimeout(id);
+  }, []);
+
   return (
-    <main style={{fontFamily:"system-ui, -apple-system, Segoe UI, Roboto", padding:"24px", lineHeight:1.5}}>
-      <h1>Alice OneNote Router</h1>
-      <div style={{background:"#e6ffed", border:"1px solid #b7eb8f", padding:"12px", borderRadius:6, maxWidth:720}}>
-        <p><strong>Signed in!</strong> Session cookie set.</p>
-      </div>
-      <p style={{marginTop:16}}>Next actions:</p>
-      <ul>
-        <li><a href="/api/debug/session">View session JSON</a></li>
-        <li><a href="/api/graph/me">Call Graph: /me</a></li>
-        <li><a href="/debug">Open debug tools</a></li>
-        <li><a href="/">Back home</a></li>
-      </ul>
+    <main style={{ fontFamily: "system-ui", padding: 24 }}>
+      <h1>Signed in</h1>
+      <p>Session cookie set. Redirecting to <code>/api/ok</code>…</p>
+      <p>
+        If nothing happens, click{" "}
+        <a href="/api/ok">here</a>.
+      </p>
     </main>
   );
 }
