@@ -29,14 +29,28 @@ export default async function handler(req, res) {
     const bodyHtml = (fields.body || "<p>(no body)</p>").toString();
 
     const fileEntries = Object.values(files || {});
+    if (!fileEntries.length) {
+      throw new Error("No files uploaded");
+    }
+
     const xhtml = makeXHTML(title, bodyHtml, fileEntries);
 
     // Build file buffers
     const prepFiles = await Promise.all(
       fileEntries.map(async (f, idx) => {
-        const localPath = f.filepath || f.path; // support both keys
-        if (!localPath) throw new Error(`File missing path: ${JSON.stringify(f)}`);
-        const buf = await fs.readFile(localPath);
+        // Try filepath/path, otherwise fall back to formidable’s toBuffer()
+        let buf;
+        if (f.filepath || f.path) {
+          const localPath = f.filepath || f.path;
+          buf = await fs.readFile(localPath);
+        } else if (typeof f.toBuffer === "function") {
+          buf = await f.toBuffer();
+        } else if (f._writeStream?._buffer) {
+          buf = f._writeStream._buffer;
+        } else {
+          throw new Error("File missing buffer/path");
+        }
+
         return {
           filename: f.originalFilename || `attachment-${idx + 1}`,
           buffer: buf,
