@@ -1,12 +1,16 @@
-export default function handler(req, res) {
-  const tenant = process.env.MS_TENANT || "common";
-  const auth = new URL(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`);
-  auth.searchParams.set("client_id", process.env.MS_CLIENT_ID);
-  auth.searchParams.set("response_type", "code");
-  auth.searchParams.set("redirect_uri", process.env.REDIRECT_URI);
-  auth.searchParams.set("response_mode", "query");
-  auth.searchParams.set("scope", process.env.MS_SCOPES || "openid profile User.Read");
+// pages/api/auth/login.js
+import { getRedirectUri } from "@/lib/graph";
 
-  // (Optional) add state/nonce later
-  res.writeHead(302, { Location: auth.toString() }).end();
+export default function handler(req, res) {
+  const params = new URLSearchParams({
+    client_id: process.env.MS_CLIENT_ID,
+    response_type: "code",
+    redirect_uri: getRedirectUri(),
+    response_mode: "query",
+    scope: process.env.MS_SCOPES || "offline_access Notes.ReadWrite User.Read",
+    prompt: "select_account"
+  });
+  const tenant = process.env.MS_TENANT || "common";
+  const url = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?${params}`;
+  res.writeHead(302, { Location: url }).end();
 }
