@@ -1,7 +1,8 @@
+/** @type {import('next').NextConfig} */
 const nextConfig = {
-  typescript: {
-    ignoreBuildErrors: true, // don't block builds
-    tsconfigPath: ""         // empty path disables TS validator
-  },
+  // Optional: skip ESLint during build if you want fewer moving parts
+  // eslint: { ignoreDuringBuilds: true },
+  // We can REMOVE the typescript block entirely now
 };
+
 export default nextConfig;
