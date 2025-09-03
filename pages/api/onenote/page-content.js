@@ -17,7 +17,11 @@ export default async function handler(req, res) {
     const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(id)}/content?includeIDs=true`;
     const r = await fetch(url, { headers: { Authorization: `Bearer ${fresh.access_token}` } });
     const html = await r.text();
-    res.status(r.status).setHeader("Content-Type", r.headers.get("content-type") || "text/html; charset=utf-8").send(html);
+
+    res
+      .status(r.status)
+      .setHeader("Content-Type", r.headers.get("content-type") || "text/html; charset=utf-8")
+      .send(html);
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
