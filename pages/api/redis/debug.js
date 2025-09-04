@@ -3,9 +3,7 @@ import { Redis } from "@upstash/redis";
 
 function mask(t) {
   if (!t) return null;
-  const head = t.slice(0, 6);
-  const tail = t.slice(-4);
-  return `${head}…${tail} (len:${t.length})`;
+  return `${t.slice(0, 6)}…${t.slice(-4)} (len:${t.length})`;
 }
 
 export default async function handler(req, res) {
@@ -15,16 +13,16 @@ export default async function handler(req, res) {
   const envInfo = {
     hasUrl: Boolean(url),
     hasToken: Boolean(token),
-    url,
-    tokenMasked: mask(token),
+    url,                 // safe to show; it’s public
+    tokenMasked: mask(token), // masked; length helps spot truncation
   };
 
   if (!url || !token) {
     return res.status(500).json({
       ok: false,
-      reason: "Missing env vars on the PROJECT",
+      reason: "Missing env vars on project",
       envInfo,
-      fix: "Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN under Project → Settings → Environment Variables, then redeploy (Skip build cache).",
+      fix: "Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel → Project → Settings → Environment Variables, then redeploy (Skip build cache).",
     });
   }
 
