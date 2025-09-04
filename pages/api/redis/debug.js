@@ -1,18 +1,28 @@
-// /pages/api/redis/debug.js
-function mask(s = '', keep = 10) {
-  if (!s) return '';
-  if (s.length <= keep) return '*'.repeat(s.length);
-  return s.slice(0, keep) + '…' + '*'.repeat(Math.max(0, s.length - keep - 1));
-}
+// pages/api/redis/debug.js
+import { Redis } from "@upstash/redis";
 
 export default async function handler(req, res) {
-  const url = process.env.UPSTASH_REDIS_REST_URL || '';
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN || '';
-  res.status(200).json({
-    ok: true,
-    url: url || null,
-    hasToken: Boolean(token),
-    tokenHead: mask(token, 10),
-    tokenLen: token.length,
-  });
+  const url = process.env.UPSTASH_REDIS_REST_URL || null;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || null;
+
+  if (!url || !token) {
+    return res.status(500).json({
+      ok: false,
+      step: "env",
+      message: "Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN"
+    });
+  }
+
+  try {
+    const redis = new Redis({ url, token });
+    const pong = await redis.ping(); // should be "PONG"
+    return res.status(200).json({ ok: true, ping: pong });
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      step: "sdk",
+      name: e?.name,
+      message: e?.message
+    });
+  }
 }
