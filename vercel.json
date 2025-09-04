@@ -1,8 +1,7 @@
 {
   "version": 2,
-  "builds": [...],
-  "routes": [...]
-  // "crons": [
-  //   { "path": "/api/cron/worker", "schedule": "*/5 * * * *" }
-  // ]
+  "routes": [],
+  "crons": [
+    { "path": "/api/cron/worker", "schedule": "0 * * * *" }
+  ]
 }
