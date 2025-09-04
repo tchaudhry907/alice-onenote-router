@@ -1,41 +1,18 @@
 // /pages/api/redis/debug.js
-import { Redis } from "@upstash/redis";
-
-function mask(t) {
-  if (!t) return null;
-  return `${t.slice(0, 6)}…${t.slice(-4)} (len:${t.length})`;
+function mask(s = '', keep = 10) {
+  if (!s) return '';
+  if (s.length <= keep) return '*'.repeat(s.length);
+  return s.slice(0, keep) + '…' + '*'.repeat(Math.max(0, s.length - keep - 1));
 }
 
 export default async function handler(req, res) {
-  const url = process.env.UPSTASH_REDIS_REST_URL || null;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN || null;
-
-  const envInfo = {
-    hasUrl: Boolean(url),
+  const url = process.env.UPSTASH_REDIS_REST_URL || '';
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+  res.status(200).json({
+    ok: true,
+    url: url || null,
     hasToken: Boolean(token),
-    url,                 // safe to show; it’s public
-    tokenMasked: mask(token), // masked; length helps spot truncation
-  };
-
-  if (!url || !token) {
-    return res.status(500).json({
-      ok: false,
-      reason: "Missing env vars on project",
-      envInfo,
-      fix: "Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel → Project → Settings → Environment Variables, then redeploy (Skip build cache).",
-    });
-  }
-
-  try {
-    const redis = new Redis({ url, token });
-    const pong = await redis.ping();
-    return res.status(200).json({ ok: true, pong, envInfo });
-  } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      reason: "Redis ping failed",
-      error: String(e?.message || e),
-      envInfo,
-    });
-  }
+    tokenHead: mask(token, 10),
+    tokenLen: token.length,
+  });
 }
