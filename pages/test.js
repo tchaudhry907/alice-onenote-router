@@ -1,6 +1,10 @@
 // pages/test.js
+import { useState } from "react";
 
 export default function TestPage() {
+  const [notebookId, setNotebookId] = useState("");
+  const [sectionId, setSectionId] = useState("");
+
   const callApi = async (endpoint, method = "GET") => {
     try {
       const res = await fetch(endpoint, { method, credentials: "include" });
@@ -22,6 +26,8 @@ export default function TestPage() {
         body: JSON.stringify({
           title: "Test Page from Alice Router",
           content: "<p>Hello from the Alice Router test dashboard 🚀</p>",
+          notebookId: notebookId || undefined,
+          sectionId: sectionId || undefined,
         }),
       });
       const data = await res.json();
@@ -50,7 +56,29 @@ export default function TestPage() {
       <button onClick={() => callApi("/api/ok")}>Test /api/ok</button>
 
       <h2>OneNote</h2>
-      <button onClick={uploadTestPage}>
+      <label>
+        Notebook ID:{" "}
+        <input
+          type="text"
+          value={notebookId}
+          onChange={(e) => setNotebookId(e.target.value)}
+          placeholder="Leave empty for default"
+          style={{ width: "400px" }}
+        />
+      </label>
+      <br />
+      <label>
+        Section ID:{" "}
+        <input
+          type="text"
+          value={sectionId}
+          onChange={(e) => setSectionId(e.target.value)}
+          placeholder="Leave empty for default"
+          style={{ width: "400px" }}
+        />
+      </label>
+      <br />
+      <button onClick={uploadTestPage} style={{ marginTop: "1rem" }}>
         Upload Test Page to OneNote
       </button>
     </div>
