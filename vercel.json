@@ -1,9 +1,8 @@
 {
   "version": 2,
-  "crons": [
-    {
-      "path": "/api/cron/worker?token=alice-cron-SECRET-123",
-      "schedule": "*/10 * * * *"
-    }
-  ]
+  "builds": [...],
+  "routes": [...]
+  // "crons": [
+  //   { "path": "/api/cron/worker", "schedule": "*/5 * * * *" }
+  // ]
 }
