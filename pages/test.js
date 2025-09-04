@@ -1,40 +1,51 @@
 // pages/test.js
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 export default function TestPage() {
+  const [notebooks, setNotebooks] = useState([]);
+  const [sections, setSections] = useState([]);
   const [notebookId, setNotebookId] = useState("");
   const [sectionId, setSectionId] = useState("");
 
-  const callApi = async (endpoint, method = "GET") => {
+  // Generic API caller
+  const callApi = async (endpoint, method = "GET", body) => {
     try {
-      const res = await fetch(endpoint, { method, credentials: "include" });
+      const res = await fetch(endpoint, {
+        method,
+        credentials: "include",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
       const data = await res.json();
       alert(JSON.stringify(data, null, 2));
+      return data;
     } catch (err) {
       alert("Error: " + err.message);
     }
   };
 
+  // Fetch notebooks
+  const fetchNotebooks = async () => {
+    const data = await callApi("/api/graph/notebooks");
+    if (data && data.value) setNotebooks(data.value);
+  };
+
+  // Fetch sections (based on notebookId if provided)
+  const fetchSections = async () => {
+    let endpoint = "/api/graph/sections";
+    if (notebookId) endpoint += `?notebookId=${encodeURIComponent(notebookId)}`;
+    const data = await callApi(endpoint);
+    if (data && data.value) setSections(data.value);
+  };
+
+  // Upload test page
   const uploadTestPage = async () => {
-    try {
-      const res = await fetch("/api/onenote/upload", {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title: "Test Page from Alice Router",
-          content: "<p>Hello from the Alice Router test dashboard 🚀</p>",
-          notebookId: notebookId || undefined,
-          sectionId: sectionId || undefined,
-        }),
-      });
-      const data = await res.json();
-      alert("Upload result:\n" + JSON.stringify(data, null, 2));
-    } catch (err) {
-      alert("Error: " + err.message);
-    }
+    await callApi("/api/onenote/upload", "POST", {
+      title: "Test Page from Alice Router",
+      content: "<p>Hello from the Alice Router test dashboard 🚀</p>",
+      notebookId: notebookId || undefined,
+      sectionId: sectionId || undefined,
+    });
   };
 
   return (
@@ -54,33 +65,45 @@ export default function TestPage() {
         Test /api/debug/hello2
       </button>
       <button onClick={() => callApi("/api/ok")}>Test /api/ok</button>
-
-      <h2>OneNote</h2>
-      <label>
-        Notebook ID:{" "}
-        <input
-          type="text"
-          value={notebookId}
-          onChange={(e) => setNotebookId(e.target.value)}
-          placeholder="Leave empty for default"
-          style={{ width: "400px" }}
-        />
-      </label>
-      <br />
-      <label>
-        Section ID:{" "}
-        <input
-          type="text"
-          value={sectionId}
-          onChange={(e) => setSectionId(e.target.value)}
-          placeholder="Leave empty for default"
-          style={{ width: "400px" }}
-        />
-      </label>
-      <br />
-      <button onClick={uploadTestPage} style={{ marginTop: "1rem" }}>
-        Upload Test Page to OneNote
+      <button onClick={() => callApi("/api/debug/env")}>
+        Show Env Vars
       </button>
+      <button onClick={() => callApi("/api/debug/session")}>
+        Show Session
+      </button>
+
+      <h2>OneNote – Explore</h2>
+      <button onClick={fetchNotebooks}>List Notebooks</button>
+      {notebooks.length > 0 && (
+        <ul>
+          {notebooks.map((nb) => (
+            <li key={nb.id}>
+              <b>{nb.displayName}</b> – {nb.id}
+              <button onClick={() => setNotebookId(nb.id)}>Select</button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <button onClick={fetchSections}>List Sections</button>
+      {sections.length > 0 && (
+        <ul>
+          {sections.map((sec) => (
+            <li key={sec.id}>
+              <b>{sec.displayName}</b> – {sec.id}
+              <button onClick={() => setSectionId(sec.id)}>Select</button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h2>Upload Test Page</h2>
+      <p>
+        Notebook: <code>{notebookId || "Default"}</code>
+        <br />
+        Section: <code>{sectionId || "Default"}</code>
+      </p>
+      <button onClick={uploadTestPage}>Upload Test Page</button>
     </div>
   );
 }
