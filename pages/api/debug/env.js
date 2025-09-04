@@ -1,18 +1,17 @@
-// /pages/api/debug/env.js
-function mask(s = '', keep = 10) {
-  if (!s) return '';
-  if (s.length <= keep) return '*'.repeat(s.length);
-  return s.slice(0, keep) + '…' + '*'.repeat(Math.max(0, s.length - keep - 1));
-}
-
+// pages/api/debug/env.js
 export default function handler(req, res) {
-  const url = process.env.UPSTASH_REDIS_REST_URL || null;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+  const url   = process.env.UPSTASH_REDIS_REST_URL || null;   // safe to show
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || null; // mask in output
+
+  const mask = (s) => (s ? s.slice(0, 8) + "…" + s.slice(-4) : null);
+
   res.status(200).json({
     ok: true,
-    url,
+    hasUrl: Boolean(url),
     hasToken: Boolean(token),
-    tokenHead: mask(token, 10),
-    tokenLen: token.length,
+    url,
+    tokenMasked: mask(token),
+    hint:
+      "If both are true but Redis still 500s, redeploy from Vercel with Skip Build Cache."
   });
 }
