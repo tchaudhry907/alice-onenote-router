@@ -7,3 +7,4 @@ export default function handler(req, res) {
     commit: process.env.VERCEL_GIT_COMMIT_SHA || "unknown"
   });
 }
+
