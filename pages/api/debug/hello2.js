@@ -1,10 +1,7 @@
 export default function handler(req, res) {
   res.status(200).json({
-    ok: true,
-    route: "/api/debug/hello2",
-    ts: new Date().toISOString(),
-    hasRedisUrl: !!process.env.UPSTASH_REDIS_REST_URL,
-    commit: process.env.VERCEL_GIT_COMMIT_SHA || "unknown"
-  });
+    text: "hello2",
+    UPSTREAM_REDIS_REST_URL: process.env.UPSTREAM_REDIS_REST_URL || "unknown",
+    VERCEL_GIT_COMMIT_SHA: process.env.VERCEL_GIT_COMMIT_SHA || "unknown"
+  })
 }
-
