@@ -1,53 +1,38 @@
 // pages/test.js
-import { useState } from "react";
 
-export default function TestDashboard() {
-  const [result, setResult] = useState("");
-
-  async function callApi(path, method = "GET") {
+export default function TestPage() {
+  const callApi = async (endpoint, method = "GET") => {
     try {
-      const res = await fetch(path, { method });
+      const res = await fetch(endpoint, { method, credentials: "include" });
       const data = await res.json();
-      setResult(JSON.stringify(data, null, 2));
+      alert(JSON.stringify(data, null, 2));
     } catch (err) {
-      setResult(`Error: ${err.message}`);
+      alert("Error: " + err.message);
     }
-  }
+  };
 
   return (
-    <div style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
-      <h1>🚀 Alice OneNote Router – Test Dashboard</h1>
-      <p>Use these buttons to test your API endpoints after logging in.</p>
+    <div style={{ fontFamily: "Arial", padding: "2rem" }}>
+      <h1>Alice OneNote Router – Test Dashboard</h1>
 
-      <div style={{ margin: "1rem 0" }}>
-        <button onClick={() => callApi("/api/debug/hello2")}>Test hello2</button>
-      </div>
+      <h2>Auth</h2>
+      <button onClick={() => (window.location.href = "/api/auth/login")}>
+        Login
+      </button>
+      <button onClick={() => callApi("/api/auth/logout", "POST")}>
+        Logout
+      </button>
 
-      <div style={{ margin: "1rem 0" }}>
-        <button onClick={() => callApi("/api/debug/ping")}>Ping</button>
-      </div>
+      <h2>Debug</h2>
+      <button onClick={() => callApi("/api/debug/hello2")}>
+        Test /api/debug/hello2
+      </button>
+      <button onClick={() => callApi("/api/ok")}>Test /api/ok</button>
 
-      <div style={{ margin: "1rem 0" }}>
-        <button onClick={() => callApi("/api/ok")}>Check OK</button>
-      </div>
-
-      <div style={{ margin: "1rem 0" }}>
-        <button onClick={() => callApi("/api/onenote/upload", "POST")}>
-          Upload Test Page to OneNote
-        </button>
-      </div>
-
-      <pre
-        style={{
-          marginTop: "2rem",
-          background: "#f4f4f4",
-          padding: "1rem",
-          borderRadius: "6px",
-          whiteSpace: "pre-wrap",
-        }}
-      >
-        {result}
-      </pre>
+      <h2>OneNote</h2>
+      <button onClick={() => callApi("/api/onenote/upload", "POST")}>
+        Upload Test Page
+      </button>
     </div>
   );
 }
