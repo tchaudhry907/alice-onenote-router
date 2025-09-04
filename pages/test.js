@@ -11,6 +11,26 @@ export default function TestPage() {
     }
   };
 
+  const uploadTestPage = async () => {
+    try {
+      const res = await fetch("/api/onenote/upload", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: "Test Page from Alice Router",
+          content: "<p>Hello from the Alice Router test dashboard 🚀</p>",
+        }),
+      });
+      const data = await res.json();
+      alert("Upload result:\n" + JSON.stringify(data, null, 2));
+    } catch (err) {
+      alert("Error: " + err.message);
+    }
+  };
+
   return (
     <div style={{ fontFamily: "Arial", padding: "2rem" }}>
       <h1>Alice OneNote Router – Test Dashboard</h1>
@@ -30,8 +50,8 @@ export default function TestPage() {
       <button onClick={() => callApi("/api/ok")}>Test /api/ok</button>
 
       <h2>OneNote</h2>
-      <button onClick={() => callApi("/api/onenote/upload", "POST")}>
-        Upload Test Page
+      <button onClick={uploadTestPage}>
+        Upload Test Page to OneNote
       </button>
     </div>
   );
