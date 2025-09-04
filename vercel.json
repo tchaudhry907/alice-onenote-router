@@ -1,7 +1,1 @@
-{
-  "version": 2,
-  "routes": []
-  // "crons": [
-  //   { "path": "/api/cron/worker", "schedule": "*/5 * * * *" }
-  // ]
-}
+{ "version": 2 }
