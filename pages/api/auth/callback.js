@@ -1,5 +1,14 @@
 // pages/api/auth/callback.js
-import { setCookie } from "cookies-next";
+function serializeCookie(name, value, { maxAge, path = "/", httpOnly = true, secure = true, sameSite = "lax" } = {}) {
+  const enc = encodeURIComponent;
+  let cookie = `${name}=${enc(value)}`;
+  if (maxAge) cookie += `; Max-Age=${Math.floor(maxAge)}`;
+  if (path) cookie += `; Path=${path}`;
+  if (httpOnly) cookie += `; HttpOnly`;
+  if (secure) cookie += `; Secure`;
+  if (sameSite) cookie += `; SameSite=${sameSite}`;
+  return cookie;
+}
 
 export default async function handler(req, res) {
   try {
@@ -15,9 +24,7 @@ export default async function handler(req, res) {
     } = process.env;
 
     const code = req.query.code;
-    if (!code) {
-      return res.status(400).json({ ok: false, error: "Missing authorization code" });
-    }
+    if (!code) return res.status(400).json({ ok: false, error: "Missing authorization code" });
     if (!MS_CLIENT_ID || !MS_CLIENT_SECRET) {
       return res.status(500).json({ ok: false, error: "Client credentials not configured" });
     }
@@ -30,12 +37,7 @@ export default async function handler(req, res) {
       grant_type: "authorization_code",
       code,
       redirect_uri: MS_REDIRECT_URI,
-    });
-
-    // Use the same scopes as the /login route
-    form.append(
-      "scope",
-      [
+      scope: [
         "offline_access",
         "openid",
         "profile",
@@ -43,54 +45,41 @@ export default async function handler(req, res) {
         "Notes.ReadWrite",
         "Notes.Create",
         "Files.ReadWrite.All",
-      ].join(" ")
-    );
+      ].join(" "),
+    });
 
-    const r = await fetch(tokenUrl, {
+    const resp = await fetch(tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
     });
 
-    const body = await r.json();
+    const body = await resp.json();
 
-    if (!r.ok) {
-      // Surface Microsoft’s real message to the browser so we can fix quickly.
-      return res
-        .status(400)
-        .json({ ok: false, error: "Token exchange failed", details: body });
+    if (!resp.ok) {
+      return res.status(400).json({ ok: false, error: "Token exchange failed", details: body });
     }
 
     const { access_token, refresh_token, id_token, expires_in } = body;
 
-    // Basic session cookies (refresh_token is what we need server-side)
-    // If you browse with Safari, cross-site cookies can be blocked—so keep SameSite=Lax.
-    const cookieOpts = {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-      path: "/",
-    };
-
+    const cookies = [];
     if (access_token) {
-      setCookie("ms_access_token", access_token, {
-        ...cookieOpts,
-        maxAge: Math.max(1, Number(expires_in || 3600) - 60),
-      });
+      cookies.push(
+        serializeCookie("ms_access_token", access_token, { maxAge: Math.max(1, (Number(expires_in) || 3600) - 60) })
+      );
     }
     if (refresh_token) {
-      setCookie("ms_refresh_token", refresh_token, {
-        ...cookieOpts,
-        // 90 days typical for MS; safe shorter default:
-        maxAge: 60 * 60 * 24 * 30,
-      });
+      // default ~30 days
+      cookies.push(serializeCookie("ms_refresh_token", refresh_token, { maxAge: 60 * 60 * 24 * 30 }));
     }
     if (id_token) {
-      setCookie("ms_id_token", id_token, { ...cookieOpts, maxAge: 60 * 60 * 24 * 7 });
+      cookies.push(serializeCookie("ms_id_token", id_token, { maxAge: 60 * 60 * 24 * 7 }));
     }
+    if (cookies.length) res.setHeader("Set-Cookie", cookies);
 
-    // Send you back to the test page
-    return res.redirect(302, "/test");
+    // back to the test dashboard
+    res.writeHead(302, { Location: "/test" });
+    res.end();
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
