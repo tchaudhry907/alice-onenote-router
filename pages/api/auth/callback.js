@@ -1,34 +1,97 @@
 // pages/api/auth/callback.js
-import { exchangeCodeForTokens } from "@/lib/graph";
-import { kv } from "@/lib/kv";
-import { setTokenCookie } from "@/lib/cookie";
+import { setCookie } from "cookies-next";
 
 export default async function handler(req, res) {
   try {
-    const { code, error, error_description } = req.query || {};
-    if (error) throw new Error(`${error}: ${error_description}`);
-    if (!code) throw new Error("Missing code");
-
-    const tokens = await exchangeCodeForTokens(code);
-    const idToken = tokens.id_token;
-    if (!idToken) throw new Error("Missing id_token");
-
-    const payload = JSON.parse(Buffer.from(idToken.split(".")[1], "base64").toString("utf8"));
-    const oid = payload.oid || payload.sub;
-    const tid = payload.tid || process.env.MS_TENANT || "common";
-    const redisKey = `msrt:${tid}:${oid}`;
-
-    if (tokens.refresh_token) {
-      await kv.set(redisKey, tokens.refresh_token, { ex: 60 * 60 * 24 * 180 });
-      // remember "who signed in last", for worker fallback
-      await kv.set("alice:lastUserKey", redisKey, { ex: 60 * 60 * 24 * 180 });
-      // optional: store a service token so cron can run without a user session
-      await kv.set("alice:service:refreshToken", tokens.refresh_token, { ex: 60 * 60 * 24 * 180 });
+    if (req.method !== "GET") {
+      return res.status(405).json({ ok: false, error: "Use GET" });
     }
 
-    setTokenCookie(res, { key: redisKey, access_token: tokens.access_token || null });
-    res.writeHead(302, { Location: "/login-success" }).end();
+    const {
+      MS_TENANT = "common",
+      MS_CLIENT_ID,
+      MS_CLIENT_SECRET,
+      MS_REDIRECT_URI = "https://alice-onenote-router.vercel.app/api/auth/callback",
+    } = process.env;
+
+    const code = req.query.code;
+    if (!code) {
+      return res.status(400).json({ ok: false, error: "Missing authorization code" });
+    }
+    if (!MS_CLIENT_ID || !MS_CLIENT_SECRET) {
+      return res.status(500).json({ ok: false, error: "Client credentials not configured" });
+    }
+
+    const tokenUrl = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`;
+
+    const form = new URLSearchParams({
+      client_id: MS_CLIENT_ID,
+      client_secret: MS_CLIENT_SECRET,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: MS_REDIRECT_URI,
+    });
+
+    // Use the same scopes as the /login route
+    form.append(
+      "scope",
+      [
+        "offline_access",
+        "openid",
+        "profile",
+        "User.Read",
+        "Notes.ReadWrite",
+        "Notes.Create",
+        "Files.ReadWrite.All",
+      ].join(" ")
+    );
+
+    const r = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+
+    const body = await r.json();
+
+    if (!r.ok) {
+      // Surface Microsoft’s real message to the browser so we can fix quickly.
+      return res
+        .status(400)
+        .json({ ok: false, error: "Token exchange failed", details: body });
+    }
+
+    const { access_token, refresh_token, id_token, expires_in } = body;
+
+    // Basic session cookies (refresh_token is what we need server-side)
+    // If you browse with Safari, cross-site cookies can be blocked—so keep SameSite=Lax.
+    const cookieOpts = {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/",
+    };
+
+    if (access_token) {
+      setCookie("ms_access_token", access_token, {
+        ...cookieOpts,
+        maxAge: Math.max(1, Number(expires_in || 3600) - 60),
+      });
+    }
+    if (refresh_token) {
+      setCookie("ms_refresh_token", refresh_token, {
+        ...cookieOpts,
+        // 90 days typical for MS; safe shorter default:
+        maxAge: 60 * 60 * 24 * 30,
+      });
+    }
+    if (id_token) {
+      setCookie("ms_id_token", id_token, { ...cookieOpts, maxAge: 60 * 60 * 24 * 7 });
+    }
+
+    // Send you back to the test page
+    return res.redirect(302, "/test");
   } catch (e) {
-    res.status(400).json({ ok: false, error: String(e.message || e) });
+    return res.status(500).json({ ok: false, error: String(e) });
   }
 }
