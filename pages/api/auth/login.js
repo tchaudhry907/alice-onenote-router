@@ -1,69 +1,66 @@
 // pages/api/auth/login.js
 import crypto from "crypto";
 
-function getBaseUrl(req) {
-  // Prefer explicit env; otherwise infer from request
-  const envBase = process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_BASE_URL;
-  if (envBase) return envBase.replace(/\/$/, "");
-  const proto = (req.headers["x-forwarded-proto"] || "https").toString();
-  const host = (req.headers.host || "").toString();
-  return `${proto}://${host}`;
+function b64url(input) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  return buf.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function serializeCookie(name, value, { maxAge, path = "/", httpOnly = true, secure = true, sameSite = "lax" } = {}) {
+  const enc = encodeURIComponent;
+  let cookie = `${name}=${enc(value)}`;
+  if (maxAge !== undefined) cookie += `; Max-Age=${Math.floor(maxAge)}`;
+  if (path) cookie += `; Path=${path}`;
+  if (httpOnly) cookie += `; HttpOnly`;
+  if (secure) cookie += `; Secure`;
+  if (sameSite) cookie += `; SameSite=${sameSite}`;
+  return cookie;
 }
 
 export default async function handler(req, res) {
-  try {
-    const clientId =
-      process.env.msclientid || process.env.MS_CLIENT_ID || process.env.AZURE_AD_CLIENT_ID;
-    if (!clientId) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "Missing msclientid / MS_CLIENT_ID environment variable" });
-    }
+  if (req.method !== "GET") return res.status(405).json({ ok: false, error: "Use GET" });
 
-    const tenant = process.env.MS_TENANT_ID || "common";
-    const baseUrl = getBaseUrl(req);
-    const redirectUri = `${baseUrl}/api/auth/callback`;
+  const {
+    MS_TENANT = "common",
+    MS_CLIENT_ID,
+    MS_REDIRECT_URI = "https://alice-onenote-router.vercel.app/api/auth/callback",
+  } = process.env;
 
-    // Scopes: include OneNote + offline_access for refresh tokens
-    const scope =
-      process.env.MS_SCOPES ||
-      "offline_access openid profile User.Read Notes.ReadWrite.All";
+  if (!MS_CLIENT_ID) return res.status(500).json({ ok: false, error: "MS_CLIENT_ID not configured" });
 
-    // Optional: PKCE (good practice, no extra deps)
-    const verifier = crypto.randomBytes(32).toString("base64url");
-    const challenge = crypto
-      .createHash("sha256")
-      .update(verifier)
-      .digest("base64")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
+  // Create PKCE pair
+  const verifier = b64url(crypto.randomBytes(32));
+  const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
 
-    // store state + verifier in HttpOnly cookies for callback to validate
-    const state = crypto.randomBytes(16).toString("hex");
-    const cookieFlags = "Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=600";
-    res.setHeader("Set-Cookie", [
-      `oauth_state=${state}; ${cookieFlags}`,
-      `pkce_verifier=${verifier}; ${cookieFlags}`,
-    ]);
+  // CSRF state
+  const state = b64url(crypto.randomBytes(16));
 
-    const params = new URLSearchParams({
-      client_id: clientId,
-      response_type: "code",
-      redirect_uri: redirectUri,
-      response_mode: "query",
-      scope,
-      state,
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      prompt: "select_account",
-    });
+  // Persist short-lived cookies for verifier & state (10 minutes)
+  res.setHeader("Set-Cookie", [
+    serializeCookie("pkce_verifier", verifier, { maxAge: 600 }),
+    serializeCookie("oauth_state", state, { maxAge: 600 }),
+  ]);
 
-    const authUrl = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?${params.toString()}`;
-    res.writeHead(302, { Location: authUrl });
-    res.end();
-  } catch (e) {
-    console.error("login error", e);
-    res.status(500).json({ ok: false, error: "Exception starting login" });
-  }
+  const scope = [
+    "offline_access",
+    "openid",
+    "profile",
+    "User.Read",
+    "Notes.ReadWrite",
+    "Notes.Create",
+    "Files.ReadWrite.All",
+  ].join(" ");
+
+  const authorize = new URL(`https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/authorize`);
+  authorize.searchParams.set("client_id", MS_CLIENT_ID);
+  authorize.searchParams.set("response_type", "code");
+  authorize.searchParams.set("redirect_uri", MS_REDIRECT_URI);
+  authorize.searchParams.set("response_mode", "query");
+  authorize.searchParams.set("scope", scope);
+  authorize.searchParams.set("code_challenge", challenge);
+  authorize.searchParams.set("code_challenge_method", "S256");
+  authorize.searchParams.set("state", state);
+
+  res.writeHead(302, { Location: authorize.toString() });
+  res.end();
 }
