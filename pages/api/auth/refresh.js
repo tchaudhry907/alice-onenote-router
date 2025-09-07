@@ -1,137 +1,127 @@
-import cookie from "cookie";
-
+// pages/api/auth/refresh.js
 /**
- * Refresh Microsoft OAuth tokens using the refresh_token cookie.
- * - Reads refresh_token from cookies
- * - Calls MS v2 token endpoint
- * - Rewrites access_token / refresh_token / id_token cookies
- * - Returns a small JSON payload for the diagnostics UI
+ * Refresh the Microsoft Graph tokens and store them in:
+ *   - Cookies (httpOnly)
+ *   - KV under key "msauth:default"  →  { access, refresh, id }
  *
- * Required env:
- *   MS_CLIENT_ID
- *   MS_CLIENT_SECRET
- *   MS_TENANT               (e.g. "common" or "consumers")
- *   APP_BASE_URL            (e.g. "https://alice-onenote-router.vercel.app")
- * Optional:
- *   REDIRECT_URI            (defaults to `${APP_BASE_URL}/api/auth/callback`)
- *   MS_SCOPES               (defaults to a safe, wide set incl. offline_access)
+ * Requirements:
+ *   MS_CLIENT_ID, MS_CLIENT_SECRET, MS_TENANT, MS_SCOPES (space-separated)
  */
+
+import { get as kvGet, set as kvSet } from "@/lib/kv";
+
+function json(res, code, body) {
+  res.status(code).setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+function setCookie(res, name, value, { maxAgeSec }) {
+  // secure, lax, httpOnly
+  const parts = [
+    `${name}=${encodeURIComponent(value || "")}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    `Max-Age=${maxAgeSec}`,
+  ];
+  res.appendHeader
+    ? res.appendHeader("Set-Cookie", parts.join("; "))
+    : res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+async function readRefreshTokenFromAnywhere(req) {
+  // 1) cookie set by this app (preferred)
+  const cookie = req.cookies?.refresh_token || req.cookies?.ms_refresh_token;
+  if (cookie) return cookie;
+
+  // 2) from KV if already saved
+  const raw = await kvGet("msauth:default");
+  if (raw) {
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (parsed?.refresh) return parsed.refresh;
+    } catch {}
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
+  if (req.method !== "GET" && req.method !== "POST") {
+    return json(res, 405, { ok: false, error: "Method not allowed" });
+  }
+
+  const client_id = process.env.MS_CLIENT_ID;
+  const client_secret = process.env.MS_CLIENT_SECRET;
+  const tenant = process.env.MS_TENANT || "common";
+  const scopes =
+    (process.env.MS_SCOPES &&
+      process.env.MS_SCOPES.split(/[ ,]+/).filter(Boolean).join(" ")) ||
+    "offline_access openid profile User.Read Notes.ReadWrite Notes.ReadWrite.All Notes.Create Files.ReadWrite.All";
+
+  if (!client_id || !client_secret) {
+    return json(res, 500, { ok: false, error: "Missing client credentials env" });
+  }
+
+  // Get a refresh token from cookie or KV
+  const refresh_token = await readRefreshTokenFromAnywhere(req);
+  if (!refresh_token) {
+    return json(res, 400, { ok: false, error: "No refresh_token cookie or KV value" });
+  }
+
+  // Exchange refresh token
+  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(
+    tenant
+  )}/oauth2/v2.0/token`;
+
+  const form = new URLSearchParams();
+  form.set("client_id", client_id);
+  form.set("client_secret", client_secret);
+  form.set("grant_type", "refresh_token");
+  form.set("refresh_token", refresh_token);
+  form.set("scope", scopes);
+
+  let tokenRes, tokenJson;
   try {
-    // Parse cookies
-    const cookies = cookie.parse(req.headers.cookie || "");
-    const existingRefresh = cookies.refresh_token;
-
-    if (!existingRefresh) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "No refresh_token cookie" });
-    }
-
-    const TENANT = process.env.MS_TENANT || "common";
-    const CLIENT_ID = process.env.MS_CLIENT_ID;
-    const CLIENT_SECRET = process.env.MS_CLIENT_SECRET;
-    const APP_BASE_URL = process.env.APP_BASE_URL;
-    const REDIRECT_URI =
-      process.env.REDIRECT_URI || `${APP_BASE_URL}/api/auth/callback`;
-    const SCOPES =
-      process.env.MS_SCOPES ||
-      "offline_access openid profile User.Read Notes.ReadWrite.All";
-
-    if (!CLIENT_ID || !CLIENT_SECRET || !APP_BASE_URL) {
-      return res.status(500).json({
-        ok: false,
-        error:
-          "Missing required env (MS_CLIENT_ID / MS_CLIENT_SECRET / APP_BASE_URL)",
-      });
-    }
-
-    const tokenEndpoint = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
-
-    // Build x-www-form-urlencoded body
-    const form = new URLSearchParams();
-    form.set("client_id", CLIENT_ID);
-    form.set("client_secret", CLIENT_SECRET);
-    form.set("grant_type", "refresh_token");
-    form.set("refresh_token", existingRefresh);
-    form.set("redirect_uri", REDIRECT_URI);
-    // Including scope on refresh keeps the token shape consistent
-    form.set("scope", SCOPES);
-
-    const resp = await fetch(tokenEndpoint, {
+    tokenRes = await fetch(tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form.toString(),
     });
-
-    const data = await resp.json();
-
-    if (!resp.ok) {
-      // Surface MS error for easier debugging
-      return res.status(400).json({
-        ok: false,
-        error: data.error || "refresh_failed",
-        error_description: data.error_description,
-      });
-    }
-
-    const {
-      access_token,
-      refresh_token,
-      id_token,
-      expires_in, // seconds
-      token_type,
-      scope,
-    } = data;
-
-    if (!access_token || !refresh_token) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing tokens in refresh response",
-        raw: data,
-      });
-    }
-
-    // Set/rotate cookies
-    const setCookies = [
-      cookie.serialize("access_token", access_token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: typeof expires_in === "number" ? expires_in : 3600,
-      }),
-      cookie.serialize("refresh_token", refresh_token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        path: "/",
-        // give it plenty of time; MS refresh tokens are long-lived but rolling
-        maxAge: 60 * 60 * 24 * 30, // 30 days
-      }),
-      cookie.serialize("id_token", id_token || "", {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: 60 * 60 * 24,
-      }),
-    ];
-
-    res.setHeader("Set-Cookie", setCookies);
-
-    return res.status(200).json({
-      ok: true,
-      token_type,
-      scope,
-      expires_in,
-      // don’t echo tokens back; they’re in cookies now
-      message: "Tokens refreshed and cookies updated",
-    });
-  } catch (err) {
-    console.error("auth/refresh error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "server_error", details: err.message });
+    tokenJson = await tokenRes.json();
+  } catch (e) {
+    return json(res, 502, { ok: false, error: "Token endpoint failed", detail: String(e) });
   }
+
+  if (!tokenRes.ok) {
+    return json(res, tokenRes.status, {
+      ok: false,
+      error: "Token refresh error",
+      detail: tokenJson,
+    });
+  }
+
+  const access = tokenJson.access_token || "";
+  const id = tokenJson.id_token || "";
+  const newRefresh = tokenJson.refresh_token || refresh_token; // MS may roll it
+
+  // Persist to KV (source of truth for server calls)
+  await kvSet(
+    "msauth:default",
+    JSON.stringify({ access, refresh: newRefresh, id }),
+  );
+
+  // Also set cookies (useful for debug tooling)
+  if (access) setCookie(res, "access_token", access, { maxAgeSec: 60 * 60 });
+  if (id) setCookie(res, "id_token", id, { maxAgeSec: 60 * 60 });
+  if (newRefresh)
+    setCookie(res, "refresh_token", newRefresh, { maxAgeSec: 60 * 60 * 24 * 90 });
+
+  return json(res, 200, {
+    ok: true,
+    token_type: tokenJson.token_type || "Bearer",
+    scope: tokenJson.scope,
+    expires_in: tokenJson.expires_in,
+    message: "Tokens refreshed and cookies + KV updated",
+  });
 }
