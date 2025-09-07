@@ -8,6 +8,20 @@ export default function OneNoteUploadFile() {
   const [result, setResult] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  async function fileToBase64Obj(f) {
+    if (!f) return null;
+    const buf = await f.arrayBuffer();
+    const b64 = arrayBufferToBase64(buf);
+    return { name: f.name, type: f.type || "application/octet-stream", dataBase64: b64 };
+  }
+
+  function arrayBufferToBase64(ab) {
+    const bytes = new Uint8Array(ab);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
   async function safeFetchJson(url, init) {
     const res = await fetch(url, init);
     const text = await res.text();
@@ -22,14 +36,16 @@ export default function OneNoteUploadFile() {
     setResult("Submitting…");
 
     try {
-      const formData = new FormData();
-      formData.append("title", title);
-      formData.append("body", body);
-      if (file) formData.append("file", file);
+      const fileObj = await fileToBase64Obj(file);
 
       const r = await safeFetchJson("/api/onenote/page-create-file", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          body,
+          file: fileObj, // null if no file chosen
+        }),
       });
 
       setResult(typeof r.body === "string" ? r.body : JSON.stringify(r.body, null, 2));
@@ -43,7 +59,7 @@ export default function OneNoteUploadFile() {
   return (
     <div style={{ padding: 20, fontFamily: "system-ui, sans-serif" }}>
       <h1>Alice OneNote Router — File Upload</h1>
-      <p>Uploads a page in your default section with an attachment.</p>
+      <p>Creates a OneNote page with an attachment in your default section.</p>
 
       <div style={{ marginBottom: 12 }}>
         <a href="/api/auth/login?state=/onenote-upload-file">Sign in</a>
@@ -72,7 +88,7 @@ export default function OneNoteUploadFile() {
         </div>
 
         <div style={{ marginBottom: 10 }}>
-          <label>Attach file</label>
+          <label>Attach file (optional)</label>
           <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         </div>
 
