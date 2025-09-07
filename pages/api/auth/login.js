@@ -1,26 +1,45 @@
-// pages/api/auth/login.js
+// /pages/api/auth/login.js
+//
+// Full, copy-paste replacement.
+// Sends the browser to the Microsoft authorize endpoint to start OAuth.
+//
+// Requires env:
+//   - MS_TENANT
+//   - MS_CLIENT_ID
+//   - APP_BASE_URL
+
 export default async function handler(req, res) {
-  const {
-    APP_BASE_URL,
-    MS_TENANT,
-    MS_CLIENT_ID,
-    REDIRECT_URI,
-    MS_SCOPES = "offline_access openid profile User.Read Notes.ReadWrite",
-  } = process.env;
+  const tenant = process.env.MS_TENANT || "common";
+  const clientId = process.env.MS_CLIENT_ID;
 
-  const state = typeof req.query.state === "string" ? req.query.state : "/";
+  const base =
+    (process.env.APP_BASE_URL || "").replace(/\/+$/, "") ||
+    "https://alice-onenote-router.vercel.app";
 
-  const authUrl = new URL(
-    `https://login.microsoftonline.com/${encodeURIComponent(
-      MS_TENANT
-    )}/oauth2/v2.0/authorize`
-  );
-  authUrl.searchParams.set("client_id", MS_CLIENT_ID);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("redirect_uri", REDIRECT_URI || `${APP_BASE_URL}/api/auth/callback`);
-  authUrl.searchParams.set("response_mode", "query");
-  authUrl.searchParams.set("scope", MS_SCOPES);
-  authUrl.searchParams.set("state", state);
+  const redirectUri = `${base}/api/auth/callback`;
 
-  res.redirect(authUrl.toString());
+  // Optional place to go AFTER our callback finishes (purely for UX)
+  const returnTo = (req.query?.return || "/debug/diagnostics").toString();
+
+  // Scopes: use your env if provided, otherwise a sane default set
+  const scope =
+    process.env.MS_SCOPES ||
+    "offline_access openid profile User.Read Files.ReadWrite.All Notes.ReadWrite.All";
+
+  // Encode the 'returnTo' inside state so the callback could use it later if desired
+  const state = Buffer.from(
+    JSON.stringify({ returnTo })
+  ).toString("base64url");
+
+  const authUrl =
+    `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize` +
+    `?client_id=${encodeURIComponent(clientId)}` +
+    `&response_type=code` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&response_mode=query` +
+    `&scope=${encodeURIComponent(scope)}` +
+    `&prompt=select_account` +
+    `&state=${encodeURIComponent(state)}`;
+
+  return res.redirect(302, authUrl);
 }
