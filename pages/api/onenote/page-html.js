@@ -1,25 +1,32 @@
-// /pages/api/onenote/page-html.js
-// GET ?id=<pageId> -> proxies the OneNote HTML content for that page (read-only)
+import { requireAuth, getAccessToken } from "@/lib/auth";
 
-import { kv } from "@/lib/kv";
-import { exchangeRefreshToken, graphFetch } from "@/lib/msgraph";
-
-export default async function handler(req, res) {
-  try {
-    const id = (req.query.id || "").toString();
-    if (!id) return res.status(400).send("Missing id");
-
-    const savedRefresh = await kv.get("alice:cron:refresh");
-    if (!savedRefresh) return res.status(400).send("Not bound");
-    const { access_token } = await exchangeRefreshToken(savedRefresh);
-
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(id)}/content`;
-    const r = await graphFetch(access_token, url);
-    const html = await r.text();
-    res.status(r.status);
-    res.setHeader("Content-Type", r.ok ? "text/html; charset=utf-8" : "application/json");
-    return res.send(html);
-  } catch (e) {
-    return res.status(500).send(String(e?.message || e));
-  }
+function wrapMinimal(html) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>${html}</body></html>`;
 }
+
+export default requireAuth(async function handler(req, res, session) {
+  if (req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+  const id = req.query.id;
+  if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+
+  const accessToken = await getAccessToken(session);
+  const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+    id
+  )}/content`;
+
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const body = await r.text();
+  if (!r.ok) {
+    return res
+      .status(r.status)
+      .json({ ok: false, error: "Fetch failed", status: r.status, body });
+  }
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.status(200).send(wrapMinimal(body));
+});
