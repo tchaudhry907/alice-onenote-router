@@ -1,47 +1,112 @@
 // pages/api/onenote/append-last.js
-import { kv } from "@/lib/kv";
-import { refreshAccessToken } from "@/lib/graph";
-import { getTokenCookie } from "@/lib/cookie";
+import { getBoundAccessToken } from "@/lib/auth";
+import { get as kvGet, set as kvSet } from "@/lib/kv";
+import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
-export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "POST");
-      return res.status(405).json({ ok: false, error: "Use POST" });
-    }
+function htmlEscape(s = "") {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
-    const tok = getTokenCookie(req);
-    if (!tok?.key) return res.status(401).json({ ok: false, error: "Not authenticated" });
-    const refreshToken = await kv.get(tok.key);
-    if (!refreshToken) return res.status(401).json({ ok: false, error: "Session expired. Sign in again." });
+async function fetchLatestPageId(accessToken) {
+  // Prefer KV if we saved the last created page id
+  const cached = await kvGet("onenote:lastCreatedPageId");
+  if (cached) return cached;
 
-    const pageId = await kv.get("alice:lastPageId");
-    if (!pageId) return res.status(400).json({ ok: false, error: "No last page id found" });
+  // Otherwise, take the most recently modified page in the Inbox section
+  const secId =
+    process.env.ONE_NOTE_INBOX_SECTION_ID ||
+    ONE_NOTE_INBOX_SECTION_ID ||
+    "";
 
-    const { html } = await readJson(req);
+  const url = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
+    secId
+  )}/pages?$orderby=lastModifiedDateTime desc&$top=1`;
 
-    const fresh = await refreshAccessToken(refreshToken);
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`;
-    const commands = [
-      { target: "body", action: "append", position: "after", content: html || `<p>Appended via append-last at ${new Date().toISOString()}</p>` }
-    ];
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      JSON.stringify({ status: res.status, body: j })
+    );
+  }
+  const pageId = j?.value?.[0]?.id;
+  if (!pageId) throw new Error("No pages found in Inbox section.");
+  return pageId;
+}
 
-    const r = await fetch(url, {
+async function appendToPage(accessToken, pageId, htmlFragment) {
+  // Correct OneNote PATCH with multipart/related where the part is named "commands"
+  const boundary = "batch_" + Date.now();
+  const commands = [
+    { target: "body", action: "append", position: "after", content: htmlFragment },
+  ];
+
+  const body =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json\r\n` +
+    `Content-Disposition: form-data; name="commands"\r\n\r\n` +
+    JSON.stringify(commands) +
+    `\r\n--${boundary}--`;
+
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+      pageId
+    )}/content`,
+    {
       method: "PATCH",
-      headers: { Authorization: `Bearer ${fresh.access_token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(commands)
-    });
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  );
 
-    const text = await r.text();
-    res.status(r.status).send(text);
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(
+      JSON.stringify({
+        status: res.status,
+        body: text || "(no body)",
+        stage: "appendToPage",
+      })
+    );
   }
 }
 
-async function readJson(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  try { return JSON.parse(raw || "{}"); } catch { return {}; }
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+  try {
+    const { text } = req.body || {};
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "Missing text" });
+    }
+
+    const accessToken = await getBoundAccessToken();
+    if (!accessToken) {
+      return res.status(401).json({ ok: false, error: "Not authenticated (no bound access token)" });
+    }
+
+    const pageId = await fetchLatestPageId(accessToken);
+    const safe = htmlEscape(String(text));
+    const fragment = `<p>${safe}</p>`;
+
+    await appendToPage(accessToken, pageId, fragment);
+
+    return res.status(200).json({ ok: true, pageId });
+  } catch (err) {
+    let detail = String(err);
+    try {
+      const m = typeof err?.message === "string" ? err.message : String(err);
+      detail = JSON.parse(m);
+    } catch (_) {}
+    return res.status(400).json({ ok: false, error: "Append failed", detail });
+  }
 }
