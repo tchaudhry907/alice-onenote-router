@@ -1,45 +1,45 @@
-// /pages/api/auth/login.js
-//
-// Full, copy-paste replacement.
-// Sends the browser to the Microsoft authorize endpoint to start OAuth.
-//
-// Requires env:
-//   - MS_TENANT
-//   - MS_CLIENT_ID
-//   - APP_BASE_URL
-
+// pages/api/auth/login.js
+/**
+ * Starts Microsoft OAuth (v2) using the Authorization Code flow.
+ * Redirects the browser to the /authorize URL with response_type=code.
+ *
+ * Env needed:
+ *   MS_CLIENT_ID
+ *   MS_TENANT                 e.g. "common" or "consumers"
+ *   APP_BASE_URL              e.g. "https://alice-onenote-router.vercel.app"
+ *   MS_SCOPES (optional)      default includes offline_access for refresh
+ */
 export default async function handler(req, res) {
-  const tenant = process.env.MS_TENANT || "common";
-  const clientId = process.env.MS_CLIENT_ID;
+  const TENANT = process.env.MS_TENANT || "common";
+  const CLIENT_ID = process.env.MS_CLIENT_ID;
+  const APP_BASE_URL = process.env.APP_BASE_URL;
 
-  const base =
-    (process.env.APP_BASE_URL || "").replace(/\/+$/, "") ||
-    "https://alice-onenote-router.vercel.app";
+  if (!CLIENT_ID || !APP_BASE_URL) {
+    return res
+      .status(500)
+      .json({ ok: false, error: "Missing MS_CLIENT_ID or APP_BASE_URL" });
+  }
 
-  const redirectUri = `${base}/api/auth/callback`;
+  const REDIRECT_URI =
+    process.env.REDIRECT_URI || `${APP_BASE_URL}/api/auth/callback`;
 
-  // Optional place to go AFTER our callback finishes (purely for UX)
-  const returnTo = (req.query?.return || "/debug/diagnostics").toString();
-
-  // Scopes: use your env if provided, otherwise a sane default set
-  const scope =
+  const SCOPES =
     process.env.MS_SCOPES ||
-    "offline_access openid profile User.Read Files.ReadWrite.All Notes.ReadWrite.All";
+    "offline_access openid profile User.Read Notes.ReadWrite.All";
 
-  // Encode the 'returnTo' inside state so the callback could use it later if desired
-  const state = Buffer.from(
-    JSON.stringify({ returnTo })
-  ).toString("base64url");
+  // Minimal state/nonce; for simplicity we leave them static here.
+  // If you want CSRF protection, generate and store state in a cookie.
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: "code",
+    redirect_uri: REDIRECT_URI,
+    response_mode: "query",
+    scope: SCOPES,
+    prompt: "select_account", // guarantees an interactive prompt if needed
+  });
 
-  const authUrl =
-    `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize` +
-    `?client_id=${encodeURIComponent(clientId)}` +
-    `&response_type=code` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&response_mode=query` +
-    `&scope=${encodeURIComponent(scope)}` +
-    `&prompt=select_account` +
-    `&state=${encodeURIComponent(state)}`;
+  const authorizeUrl = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize?${params.toString()}`;
 
-  return res.redirect(302, authUrl);
+  res.writeHead(302, { Location: authorizeUrl });
+  res.end();
 }
