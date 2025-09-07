@@ -1,119 +1,134 @@
 // pages/debug/diagnostics.js
-// Simple, dependency-free diagnostics page with buttons and live results.
+// A single-page diagnostic panel with "hard reset + login".
+// Buttons call existing API routes and show results inline.
+
+import { useEffect, useState } from "react";
+
+const APP_BASE = "https://alice-onenote-router.vercel.app";
+
+// Helper fetcher
+async function jget(path) {
+  const res = await fetch(path, { credentials: "include" });
+  let text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { _raw: text };
+  }
+}
 
 export default function Diagnostics() {
-  const run = async (id, url) => {
-    const el = document.getElementById(id);
-    el.textContent = "…running…";
-    try {
-      const r = await fetch(url, { credentials: "include" });
-      const text = await r.text();
-      // Try to pretty print JSON if possible
-      try {
-        const j = JSON.parse(text);
-        el.textContent = JSON.stringify(j, null, 2);
-      } catch {
-        el.textContent = text;
-      }
-    } catch (e) {
-      el.textContent = String(e);
-    }
-  };
+  const [env, setEnv] = useState(null);
+  const [session, setSession] = useState(null);
+  const [tokens, setTokens] = useState(null);
+  const [headers, setHeaders] = useState(null);
+  const [cookies, setCookies] = useState(null);
+  const [base, setBase] = useState(APP_BASE);
 
-  const openAndReturn = (href) => {
-    // Navigate but keep a return path back to diagnostics
-    const u = new URL(href, location.origin);
-    u.searchParams.set("return", "/debug/diagnostics");
-    location.href = u.toString();
-  };
+  async function reloadAll() {
+    setBase(APP_BASE);
+    const [e, s, t, h, c] = await Promise.all([
+      jget("/api/debug/env"),
+      jget("/api/debug/session"),
+      jget("/api/debug/tokens"),
+      jget("/api/debug/headers"),
+      jget("/api/debug/show-cookies"),
+    ]);
+    setEnv(e);
+    setSession(s);
+    setTokens(t);
+    setHeaders(h);
+    setCookies(c);
+  }
+
+  useEffect(() => {
+    reloadAll();
+  }, []);
+
+  function open(url) {
+    window.location.href = url;
+  }
+
+  async function clearSessionCookies() {
+    await jget("/api/debug/clear-cookies"); // returns {cleared:true,...}
+    await reloadAll();
+    alert("Cleared app session cookies.");
+  }
+
+  // This is the one-click "make MS prompt me and return tokens" path:
+  // 1) Clear app cookies
+  // 2) Hit MS logout so MS won’t silently reuse login
+  // 3) Redirect back to our /api/auth/login (which sends us to authorize)
+  async function hardResetAndLogin() {
+    try {
+      await jget("/api/debug/clear-cookies");
+    } catch {}
+    const msLogout =
+      "https://login.microsoftonline.com/common/oauth2/v2.0/logout" +
+      `?post_logout_redirect_uri=${encodeURIComponent(
+        `${APP_BASE}/api/auth/login`
+      )}`;
+    open(msLogout);
+  }
+
+  // Just send user to our normal login handler
+  function forceMicrosoftLogin() {
+    open("/api/auth/login");
+  }
+
+  function logoutApp() {
+    open("/api/auth/logout");
+  }
+
+  function refreshTokens() {
+    open("/api/auth/refresh");
+  }
+
+  function box(title, obj) {
+    return (
+      <div style={{ margin: "18px 0" }}>
+        <div style={{ fontWeight: 700 }}>{title}</div>
+        <pre
+          style={{
+            background: "#111",
+            color: "#eee",
+            padding: 12,
+            whiteSpace: "pre-wrap",
+            borderRadius: 6,
+          }}
+        >
+{JSON.stringify(obj ?? {}, null, 2)}
+        </pre>
+      </div>
+    );
+  }
 
   return (
-    <html>
-      <head>
-        <title>Alice OneNote Router — Diagnostics</title>
-        <meta charSet="utf-8" />
-        <style>{`
-          body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
-          h1 { margin: 0 0 6px; font-size: 20px; }
-          .sub { color:#666; margin-bottom: 16px; }
-          .row { display:flex; flex-wrap: wrap; gap:8px; margin-bottom: 14px; }
-          button, a.btn {
-            padding:8px 10px; border:1px solid #ccc; background:#fafafa; cursor:pointer; border-radius:6px;
-            text-decoration:none; color:#111; display:inline-block;
-          }
-          button:hover, a.btn:hover { background:#f0f0f0; }
-          pre {
-            background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; overflow:auto;
-            font-size: 12px; line-height: 1.4; max-height: 360px;
-          }
-          .block { margin:16px 0; }
-          .label { font-weight:600; margin:8px 0; }
-        `}</style>
-      </head>
-      <body>
-        <h1>Alice OneNote Router — Diagnostics</h1>
-        <div className="sub">
-          Base URL (detected): <code>{typeof window !== "undefined" ? window.location.origin : ""}</code>
-        </div>
+    <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto", padding: 16 }}>
+      <h2>Alice OneNote Router — Diagnostics</h2>
+      <div style={{ marginBottom: 8, color: "#666" }}>
+        Base URL (detected): <code>{base}</code>
+      </div>
 
-        <div className="row">
-          <button onClick={() => openAndReturn("/api/auth/login?force=1")}>
-            Force Microsoft Login
-          </button>
-          <button onClick={() => (location.href = "/api/debug/clear-cookies?return=/debug/diagnostics")}>
-            Clear Session/Cookies
-          </button>
-          <button onClick={() => (location.href = "/api/auth/logout?return=/debug/diagnostics")}>
-            Logout (App)
-          </button>
-          <a className="btn" href="/">Home</a>
-        </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <button onClick={hardResetAndLogin}>Hard Reset + Login</button>
+        <button onClick={forceMicrosoftLogin}>Force Microsoft Login</button>
+        <button onClick={clearSessionCookies}>Clear Session Cookies</button>
+        <button onClick={logoutApp}>Logout (App)</button>
+        <button onClick={refreshTokens}>Refresh Tokens</button>
+        <button onClick={reloadAll}>Reload Panels</button>
+      </div>
 
-        <div className="row">
-          <button onClick={() => run("env", "/api/debug/env")}>Env (Server)</button>
-          <button onClick={() => run("session", "/api/debug/session")}>Session</button>
-          <button onClick={() => run("tokens", "/api/debug/tokens")}>Tokens</button>
-          <button onClick={() => run("headers", "/api/debug/headers")}>Headers</button>
-          <button onClick={() => run("cookies", "/api/debug/show-cookies")}>Cookies</button>
-        </div>
+      {box("Environment (/api/debug/env)", env)}
+      {box("Session (/api/debug/session)", session)}
+      {box("Tokens (/api/debug/tokens)", tokens)}
+      {box("Headers (/api/debug/headers)", headers)}
+      {box("Cookies (/api/debug/show-cookies)", cookies)}
 
-        <div className="row">
-          {/* NEW: deep functional checks */}
-          <button onClick={() => run("graph", "/api/debug/test-graph")}>
-            Test Microsoft Graph (/me + OneNote)
-          </button>
-        </div>
-
-        <div className="block">
-          <div className="label">Environment (/api/debug/env)</div>
-          <pre id="env">Click a button to load…</pre>
-        </div>
-
-        <div className="block">
-          <div className="label">Session (/api/debug/session)</div>
-          <pre id="session">Click a button to load…</pre>
-        </div>
-
-        <div className="block">
-          <div className="label">Tokens (/api/debug/tokens)</div>
-          <pre id="tokens">Click a button to load…</pre>
-        </div>
-
-        <div className="block">
-          <div className="label">Headers (/api/debug/headers)</div>
-          <pre id="headers">Click a button to load…</pre>
-        </div>
-
-        <div className="block">
-          <div className="label">Cookies (/api/debug/show-cookies)</div>
-          <pre id="cookies">Click a button to load…</pre>
-        </div>
-
-        <div className="block">
-          <div className="label">Graph Test (/api/debug/test-graph)</div>
-          <pre id="graph">Click “Test Microsoft Graph” above…</pre>
-        </div>
-      </body>
-    </html>
+      <div style={{ marginTop: 24, fontSize: 13, color: "#888" }}>
+        Tip: If **Tokens** still shows <code>null</code>, run **Hard Reset + Login** in a new
+        incognito window to bypass any Microsoft account cookies.
+      </div>
+    </div>
   );
 }
