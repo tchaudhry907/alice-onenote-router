@@ -1,37 +1,41 @@
 // pages/api/onenote/page-latest.js
-// Return metadata for the last created page (saved in KV as alice:lastPageId).
-
-import { requireAuth } from "@/lib/auth";
-import { kv } from "@/lib/kv";
-import { graphFetch } from "@/lib/msgraph";
+import { getBoundAccessToken } from "@/lib/auth";
+import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
 export default async function handler(req, res) {
-  const auth = await requireAuth(req, res);
-  if (!auth) return;
-
+  if (req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
   try {
-    const id = await kv.get("alice:lastPageId");
-    if (!id) {
-      return res.status(404).json({ ok: false, error: "No last page id found. Create one first." });
+    const accessToken = await getBoundAccessToken();
+    if (!accessToken) {
+      return res.status(401).json({ ok: false, error: "Not authenticated (no bound access token)" });
     }
 
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(String(id))}`;
-    const r = await graphFetch(auth.accessToken, url);
-    const j = await r.json();
+    const secId =
+      process.env.ONE_NOTE_INBOX_SECTION_ID ||
+      ONE_NOTE_INBOX_SECTION_ID ||
+      "";
 
-    if (!r.ok) {
-      return res.status(r.status).json({ ok: false, error: j });
-    }
+    const url = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
+      secId
+    )}/pages?$orderby=lastModifiedDateTime desc&$top=1`;
 
-    // Return a concise payload used by the dashboard
-    res.status(200).json({
-      ok: true,
-      id: j.id,
-      title: j.title,
-      createdDateTime: j.createdDateTime,
-      links: j.links, // includes oneNoteWebUrl / oneNoteClientUrl
+    const r = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(400).json({ ok: false, error: j });
+    }
+
+    const page = j?.value?.[0] || null;
+    if (!page) {
+      return res.status(404).json({ ok: false, error: "No pages found" });
+    }
+
+    return res.status(200).json({ ok: true, page });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err) });
   }
 }
