@@ -1,92 +1,147 @@
 // /pages/api/onenote/search.js
-// POST { q?: string, limit?: number, notebook?: string, deep?: boolean, deepLimit?: number }
-// - notebook defaults to "AliceChatGPT"
-// - q filters by title (case-insensitive); if deep=true, also fetches HTML for up to deepLimit pages and searches content.
-// - Returns pages only from the specified notebook's sections.
+// Deep search inside the AliceChatGPT notebook.
+// POST { q: string, limit?: number, notebook?: string, deep?: boolean, deepLimit?: number }
+// Defaults: notebook="AliceChatGPT", deep=true, limit=10, deepLimit=20 (max #pages whose HTML we scan)
+//
+// How it works:
+// 1) Resolve notebook -> sections (cached by our own endpoint).
+// 2) Pull recent pages (no $search to avoid OData issues).
+// 3) Filter pages to that notebook's sections.
+// 4) If q is present:
+//    - fast filter by title
+//    - if deep=true, fetch HTML for up to deepLimit recent pages and match q in content
+//
+// Notes:
+// - Always returns JSON (never HTML), even on errors.
+// - If Graph or an internal call returns HTML, we wrap that as a JSON error with status/text.
 
 import { kv } from "@/lib/kv";
 import { exchangeRefreshToken, graphFetch } from "@/lib/msgraph";
 
-export const config = { api: { bodyParser: true, externalResolver: true } };
+export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Use POST with JSON { q?, limit?, notebook?, deep?, deepLimit? }" });
+    return res.status(405).json({ ok: false, error: "Use POST with JSON { q, limit?, notebook?, deep?, deepLimit? }" });
   }
 
   try {
     const savedRefresh = await kv.get("alice:cron:refresh");
-    if (!savedRefresh) return res.status(400).json({ ok: false, error: "Not bound. Visit /api/cron/bind while signed in." });
+    if (!savedRefresh) {
+      return res.status(400).json({ ok: false, error: "Not bound. Visit /api/cron/bind while signed in." });
+    }
     const { access_token } = await exchangeRefreshToken(savedRefresh);
 
+    // inputs
     const body = (req.body && typeof req.body === "object") ? req.body : {};
-    const q = typeof body.q === "string" ? body.q.trim() : "";
-    const limit = Number.isFinite(body.limit) ? Math.min(Math.max(1, body.limit), 50) : 20;
+    const qRaw = typeof body.q === "string" ? body.q : "";
+    const q = qRaw.trim();
+    const limit = clampInt(body.limit, 10, 1, 50);
     const notebookName = (body.notebook || "AliceChatGPT").toString();
-    const deep = !!body.deep;
-    const deepLimit = Number.isFinite(body.deepLimit) ? Math.min(Math.max(1, body.deepLimit), 20) : 8; // keep this small
+    const deep = body.deep === undefined ? true : !!body.deep; // default deep=true
+    const deepLimit = clampInt(body.deepLimit, 20, 1, 40);     // cap to be nice to Graph
 
-    // Resolve notebook/sections via our own API (cached)
+    // 1) Resolve notebook + sections (via our own API)
     const base = `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}`;
     const nbUrl = new URL(`${base}/api/onenote/sections-in-onenote`);
     nbUrl.searchParams.set("name", notebookName);
     const nbRes = await fetch(nbUrl.toString());
-    const nbJson = await nbRes.json();
-    if (!nbJson.ok) return res.status(400).json({ ok: false, error: `Resolve notebook failed: ${nbJson.error || nbRes.status}` });
+    const nbText = await nbRes.text();
+    let nbJson = safeJson(nbText);
+    if (!nbRes.ok || !nbJson || !nbJson.ok) {
+      return res.status(502).json({
+        ok: false,
+        error: `Resolve notebook failed`,
+        detail: {
+          status: nbRes.status,
+          body: truncate(nbText, 400)
+        }
+      });
+    }
     const allowSectionIds = new Set((nbJson.sections || []).map(s => s.id));
 
-    // Pull recent pages (no $search to avoid OData errors), request parentSection to filter by notebook
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages?$top=100&$orderby=createdDateTime desc&$select=id,title,createdDateTime,lastModifiedDateTime,links&$expand=parentSection($select=id,displayName)`;
-    const r = await graphFetch(access_token, url);
-    const t = await r.text();
-    let j = null; try { j = JSON.parse(t); } catch {}
-    if (!r.ok) return res.status(r.status).send(j || t);
+    // 2) Get recent pages (ask parentSection to filter to notebook)
+    // No $search here (OData errors), we do client-side filtering/deep scan
+    const pagesUrl = `https://graph.microsoft.com/v1.0/me/onenote/pages` +
+      `?$top=100&$orderby=createdDateTime desc` +
+      `&$select=id,title,createdDateTime,lastModifiedDateTime,links` +
+      `&$expand=parentSection($select=id,displayName)`;
 
-    const items = Array.isArray(j.value) ? j.value : [];
-    // Filter by notebook sections first
-    let filtered = items.filter(p => allowSectionIds.has(p.parentSection?.id));
-
-    // Title filter if q provided (case-insensitive)
-    if (q) {
-      const qLower = q.toLowerCase();
-      filtered = filtered.filter(p => (p.title || "").toLowerCase().includes(qLower));
+    const pr = await graphFetch(access_token, pagesUrl);
+    const pText = await pr.text();
+    const pJson = safeJson(pText);
+    if (!pr.ok || !pJson) {
+      return res.status(502).json({
+        ok: false,
+        error: "Pages fetch failed",
+        detail: { status: pr.status, body: truncate(pText, 400) }
+      });
     }
 
-    // Trim to requested limit (we may expand if deep adds matches)
-    let results = filtered.slice(0, limit).map(toResult);
+    const items = Array.isArray(pJson.value) ? pJson.value : [];
+    // 3) Filter only pages within our notebook sections
+    let fromNotebook = items.filter(p => allowSectionIds.has(p.parentSection?.id));
 
-    // Optional deep search: fetch HTML for a few most recent pages from this notebook, and include those whose content contains q
+    // 4) Title filter
+    let results = [];
+    if (q) {
+      const qLower = q.toLowerCase();
+      results = fromNotebook.filter(p => (p.title || "").toLowerCase().includes(qLower));
+    } else {
+      results = fromNotebook.slice(0, limit);
+    }
+
+    // Build result objects
+    let out = results.slice(0, limit).map(toResult);
+
+    // Deep content filter (optional & only if q present)
     if (q && deep) {
-      const toCheck = filtered.slice(0, Math.max(limit, deepLimit)); // check recent ones
-      const contentMatches = [];
-      for (const p of toCheck) {
+      const qLower = q.toLowerCase();
+
+      // Choose which pages to scan (recent ones from this notebook)
+      const scanPool = fromNotebook.slice(0, Math.max(limit, deepLimit));
+
+      const deepMatches = [];
+      for (const p of scanPool) {
         try {
           const contentUrl = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(p.id)}/content`;
           const cr = await graphFetch(access_token, contentUrl);
           const html = await cr.text();
-          if (cr.ok && html && html.toLowerCase().includes(q.toLowerCase())) {
-            contentMatches.push(p.id);
+          if (cr.ok) {
+            if (html && html.toLowerCase().includes(qLower)) {
+              deepMatches.push(p);
+            }
+          } else {
+            // Non-200—ignore but don't crash the endpoint
           }
-        } catch {}
-        if (contentMatches.length >= deepLimit) break;
-      }
-      // Add any deep matches not already in the results (then cap to limit)
-      const existing = new Set(results.map(r => r.id));
-      for (const p of toCheck) {
-        if (contentMatches.includes(p.id) && !existing.has(p.id)) {
-          results.push(toResult(p));
+        } catch {
+          // Network or parse error—ignore for this page
         }
+        if (deepMatches.length >= deepLimit) break;
       }
-      results = results.slice(0, limit);
+
+      // Merge: add any deep matches not already present
+      const existing = new Set(out.map(r => r.id));
+      for (const p of deepMatches) {
+        if (!existing.has(p.id)) out.push(toResult(p));
+        if (out.length >= limit) break;
+      }
     }
 
-    return res.status(200).json({ ok: true, count: results.length, results, notebook: notebookName, deepUsed: !!deep });
+    return res.status(200).json({
+      ok: true,
+      notebook: notebookName,
+      deepUsed: !!(q && deep),
+      count: out.length,
+      results: out
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
 
+// Helpers
 function toResult(p) {
   return {
     id: p.id,
@@ -96,4 +151,16 @@ function toResult(p) {
     section: p.parentSection?.displayName || null,
     links: p.links || {}
   };
+}
+function clampInt(v, def, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+function safeJson(text) {
+  try { return JSON.parse(text); } catch { return null; }
+}
+function truncate(s, n) {
+  if (typeof s !== "string") return s;
+  return s.length <= n ? s : s.slice(0, n) + "…";
 }
