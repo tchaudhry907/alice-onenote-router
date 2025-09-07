@@ -1,7 +1,13 @@
 // pages/api/onenote/append-last.js
-import { getBoundAccessToken } from "@/lib/auth";
-import { get as kvGet, set as kvSet } from "@/lib/kv";
+import { get as kvGet } from "@/lib/kv";
 import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
+
+/** Read the bound access token directly from KV (same key your create endpoint uses). */
+async function getAccessTokenFromKV() {
+  const blob = await kvGet("msauth:default"); // { access, refresh, id }
+  const token = blob?.access;
+  return typeof token === "string" && token.length > 0 ? token : null;
+}
 
 function htmlEscape(s = "") {
   return s
@@ -11,15 +17,15 @@ function htmlEscape(s = "") {
 }
 
 async function fetchLatestPageId(accessToken) {
-  // Prefer KV if we saved the last created page id
-  const cached = await kvGet("onenote:lastCreatedPageId");
-  if (cached) return cached;
-
-  // Otherwise, take the most recently modified page in the Inbox section
+  // Prefer the Inbox section (fast + predictable) and take the most-recent page
   const secId =
     process.env.ONE_NOTE_INBOX_SECTION_ID ||
     ONE_NOTE_INBOX_SECTION_ID ||
     "";
+
+  if (!secId) {
+    throw new Error("ONE_NOTE_INBOX_SECTION_ID not set and no fallback.");
+  }
 
   const url = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
     secId
@@ -28,19 +34,19 @@ async function fetchLatestPageId(accessToken) {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+
   const j = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(
-      JSON.stringify({ status: res.status, body: j })
-    );
+    throw new Error(JSON.stringify({ status: res.status, body: j, stage: "fetchLatestPageId" }));
   }
+
   const pageId = j?.value?.[0]?.id;
   if (!pageId) throw new Error("No pages found in Inbox section.");
   return pageId;
 }
 
 async function appendToPage(accessToken, pageId, htmlFragment) {
-  // Correct OneNote PATCH with multipart/related where the part is named "commands"
+  // OneNote multipart/related PATCH: the single part MUST be named "commands"
   const boundary = "batch_" + Date.now();
   const commands = [
     { target: "body", action: "append", position: "after", content: htmlFragment },
@@ -54,9 +60,7 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
     `\r\n--${boundary}--`;
 
   const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
-      pageId
-    )}/content`,
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`,
     {
       method: "PATCH",
       headers: {
@@ -89,15 +93,16 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "Missing text" });
     }
 
-    const accessToken = await getBoundAccessToken();
+    const accessToken = await getAccessTokenFromKV();
     if (!accessToken) {
-      return res.status(401).json({ ok: false, error: "Not authenticated (no bound access token)" });
+      return res
+        .status(401)
+        .json({ ok: false, error: "Not authenticated (no bound access token in KV)" });
     }
 
     const pageId = await fetchLatestPageId(accessToken);
     const safe = htmlEscape(String(text));
     const fragment = `<p>${safe}</p>`;
-
     await appendToPage(accessToken, pageId, fragment);
 
     return res.status(200).json({ ok: true, pageId });
