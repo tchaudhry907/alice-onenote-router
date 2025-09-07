@@ -4,7 +4,8 @@ import { graphFetch } from "@/lib/msgraph";
 
 export default async function handler(req, res) {
   const auth = await requireAuth(req, res);
-  if (!auth) return;
+  if (!auth) return; // requireAuth has already sent 401 with { ok:false }
+
   try {
     const meRes = await graphFetch(auth.accessToken, "https://graph.microsoft.com/v1.0/me");
     const me = await meRes.json();
