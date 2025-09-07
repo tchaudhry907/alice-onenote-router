@@ -35,7 +35,9 @@ async function fetchLatestPageId(accessToken) {
 
   const j = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(JSON.stringify({ status: res.status, body: j, stage: "fetchLatestPageId" }));
+    throw new Error(
+      JSON.stringify({ status: res.status, body: j, stage: "fetchLatestPageId" })
+    );
   }
 
   const pageId = j?.value?.[0]?.id;
@@ -44,27 +46,33 @@ async function fetchLatestPageId(accessToken) {
 }
 
 async function appendToPage(accessToken, pageId, htmlFragment) {
-  // OneNote requires multipart/related; the JSON part must be named "Commands"
-  const boundary = "batch_" + Date.now();
-
+  // OneNote update must be multipart/form-data with a part named "commands" (lowercase).
+  const boundary = "formboundary_" + Date.now();
   const commands = [
-    { target: "body", action: "append", position: "after", content: htmlFragment }
+    {
+      target: "body",
+      action: "append",
+      position: "after",
+      content: htmlFragment,
+    },
   ];
 
   const body =
     `--${boundary}\r\n` +
-    `Content-Type: application/json; charset=utf-8\r\n` +
-    `Content-Disposition: form-data; name="Commands"\r\n\r\n` + // Capital C
+    `Content-Disposition: form-data; name="commands"\r\n` +
+    `Content-Type: application/json; charset=utf-8\r\n\r\n` +
     JSON.stringify(commands) + `\r\n` +
-    `--${boundary}--`;
+    `--${boundary}--\r\n`;
 
   const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`,
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+      pageId
+    )}/content`,
     {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        "Content-Type": `multipart/related; boundary=${boundary}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
       },
       body,
     }
@@ -72,7 +80,13 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
 
   const text = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(JSON.stringify({ status: res.status, body: text || "(no body)", stage: "appendToPage" }));
+    throw new Error(
+      JSON.stringify({
+        status: res.status,
+        body: text || "(no body)",
+        stage: "appendToPage",
+      })
+    );
   }
 }
 
@@ -88,7 +102,9 @@ export default async function handler(req, res) {
 
     const accessToken = await getAccessTokenFromKV();
     if (!accessToken) {
-      return res.status(401).json({ ok: false, error: "Not authenticated (no bound access token in KV)" });
+      return res
+        .status(401)
+        .json({ ok: false, error: "Not authenticated (no bound access token in KV)" });
     }
 
     const pageId = await fetchLatestPageId(accessToken);
