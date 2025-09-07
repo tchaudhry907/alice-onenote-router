@@ -1,45 +1,89 @@
 // pages/api/onenote/page-text.js
-import { get as kvGet } from "@/lib/kv";
+import { requireAuth, getAccessToken } from "@/lib/auth";
 
-async function getAccessTokenFromKV() {
-  const blob = await kvGet("msauth:default");
-  const token = blob?.access;
-  return typeof token === "string" && token.length > 0 ? token : null;
-}
-
-function stripHtml(html = "") {
-  // very basic conversion; keeps newlines around block tags
-  return html
-    .replace(/<\/(p|div|h[1-6]|li|br|tr)>/gi, "$&\n")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .trim();
-}
-
-export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+/**
+ * Fetches the raw HTML of a OneNote page via Microsoft Graph and returns a plain-text extraction.
+ * We call Graph directly:
+ *   GET https://graph.microsoft.com/v1.0/me/onenote/pages/{id}/content?includeIDs=true
+ *
+ * Returns: { ok: true, id, title?, text, bytes }
+ */
+function htmlToPlainText(html = "") {
   try {
-    const id = String(req.query.id || "");
-    if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
-
-    const accessToken = await getAccessTokenFromKV();
-    if (!accessToken) {
-      return res.status(401).json({ ok: false, error: "Not authenticated (no bound access token)" });
-    }
-
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(id)}/content?includeIDs=true`;
-    const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    const html = await r.text();
-    if (!r.ok) {
-      return res.status(400).json({ ok: false, error: html || "(no body)" });
-    }
-
-    return res.status(200).json({ ok: true, id, text: stripHtml(html) });
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: String(e) });
+    // Remove scripts/styles
+    html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+    html = html.replace(/<style[\s\S]*?<\/style>/gi, "");
+    // Replace <br> and block tags with newlines
+    html = html.replace(/<(?:br|BR)\s*\/?>/g, "\n");
+    html = html.replace(/<\/(p|div|h[1-6]|li|ul|ol|table|tr|td|th)>/gi, "\n");
+    // Strip the rest of tags
+    html = html.replace(/<[^>]+>/g, "");
+    // Decode minimal entities
+    html = html
+      .replace(/&nbsp;/g, " ")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+    // Collapse excessive whitespace
+    html = html.replace(/\r/g, "");
+    html = html.replace(/\n{3,}/g, "\n\n");
+    html = html.trim();
+    return html;
+  } catch {
+    return "";
   }
 }
+
+export default requireAuth(async function handler(req, res, session) {
+  try {
+    const id =
+      req.method === "GET"
+        ? req.query?.id
+        : (req.body && req.body.id) || req.query?.id;
+
+    if (!id || typeof id !== "string") {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing required 'id' parameter" });
+    }
+
+    const accessToken = await getAccessToken(session);
+
+    // IMPORTANT: call Graph content endpoint directly (NOT the web link)
+    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+      id
+    )}/content?includeIDs=true`;
+
+    const r = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        // Let Graph return HTML; do NOT follow OneDrive web redirects
+        Accept: "text/html",
+      },
+    });
+
+    const raw = await r.text().catch(() => "");
+    if (!r.ok) {
+      return res
+        .status(r.status)
+        .json({ ok: false, error: raw || `(status ${r.status})` });
+    }
+
+    const text = htmlToPlainText(raw);
+    return res.status(200).json({
+      ok: true,
+      id,
+      text,
+      bytes: raw.length,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error:
+        typeof err?.message === "string" ? err.message : "Unhandled server error",
+    });
+  }
+});
