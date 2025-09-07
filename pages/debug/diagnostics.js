@@ -1,203 +1,119 @@
 // pages/debug/diagnostics.js
-// Unified diagnostics page to aggregate all our debug endpoints in one view.
+// Simple, dependency-free diagnostics page with buttons and live results.
 
-export async function getServerSideProps(ctx) {
-  const { req } = ctx;
-
-  // Build absolute base URL that works on Vercel + locally
-  const proto =
-    req.headers["x-forwarded-proto"]?.toString().split(",")[0] || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  const base = `${proto}://${host}`;
-
-  async function jget(path) {
+export default function Diagnostics() {
+  const run = async (id, url) => {
+    const el = document.getElementById(id);
+    el.textContent = "…running…";
     try {
-      const r = await fetch(`${base}${path}`, {
-        headers: {
-          cookie: req.headers.cookie || "",
-        },
-      });
+      const r = await fetch(url, { credentials: "include" });
       const text = await r.text();
-      // Try JSON first; if not JSON, return raw text to display error bodies.
+      // Try to pretty print JSON if possible
       try {
-        return { ok: r.ok, status: r.status, data: JSON.parse(text) };
+        const j = JSON.parse(text);
+        el.textContent = JSON.stringify(j, null, 2);
       } catch {
-        return { ok: r.ok, status: r.status, data: text };
+        el.textContent = text;
       }
     } catch (e) {
-      return { ok: false, status: 0, data: String(e) };
+      el.textContent = String(e);
     }
-  }
-
-  const [env, session, tokens, headers, cookies] = await Promise.all([
-    jget("/api/debug/env"),
-    jget("/api/debug/session"),
-    jget("/api/debug/tokens"),
-    jget("/api/debug/headers"),
-    jget("/api/debug/show-cookies"),
-  ]);
-
-  // Redact obvious secrets/tokens if present
-  function redact(obj) {
-    const mask = (s) =>
-      typeof s === "string" && s.length > 12
-        ? s.slice(0, 4) + "…" + s.slice(-4)
-        : s;
-
-    function walk(v) {
-      if (v === null || v === undefined) return v;
-      if (Array.isArray(v)) return v.map(walk);
-      if (typeof v === "object") {
-        const out = {};
-        for (const k of Object.keys(v)) {
-          const low = k.toLowerCase();
-          if (
-            low.includes("token") ||
-            low.includes("secret") ||
-            low.includes("password") ||
-            low.includes("cookie")
-          ) {
-            out[k] = mask(v[k]);
-          } else {
-            out[k] = walk(v[k]);
-          }
-        }
-        return out;
-      }
-      return v;
-    }
-    return walk(obj);
-  }
-
-  // Convenience booleans for UI badges
-  const envOk =
-    env?.ok &&
-    env?.data &&
-    typeof env.data === "object" &&
-    !!env.data.APP_BASE_URL &&
-    !!env.data.MS_CLIENT_ID &&
-    !!env.data.REDIRECT_URI &&
-    !!env.data.MS_TENANT;
-
-  const sessionOk =
-    session?.ok &&
-    session?.data &&
-    typeof session.data === "object" &&
-    (!!session.data.pkce_verifier || !!session.data.code_verifier);
-
-  const tokensOk =
-    tokens?.ok &&
-    tokens?.data &&
-    typeof tokens.data === "object" &&
-    !!tokens.data.refresh_token;
-
-  return {
-    props: {
-      base,
-      env: { ...env, data: redact(env.data) },
-      session: { ...session, data: redact(session.data) },
-      tokens: { ...tokens, data: redact(tokens.data) },
-      headers: { ...headers, data: redact(headers.data) },
-      cookies: { ...cookies, data: redact(cookies.data) },
-      flags: { envOk, sessionOk, tokensOk },
-    },
   };
-}
 
-export default function Diagnostics({
-  base,
-  env,
-  session,
-  tokens,
-  headers,
-  cookies,
-  flags,
-}) {
-  const Badge = ({ ok, label }) => (
-    <span
-      style={{
-        padding: "4px 8px",
-        borderRadius: 8,
-        fontSize: 12,
-        fontWeight: 600,
-        color: ok ? "#064e3b" : "#7f1d1d",
-        background: ok ? "#d1fae5" : "#fee2e2",
-        border: `1px solid ${ok ? "#10b981" : "#ef4444"}`,
-        marginRight: 8,
-      }}
-    >
-      {label}: {ok ? "OK" : "Missing/Invalid"}
-    </span>
-  );
-
-  const Block = ({ title, payload }) => (
-    <div style={{ marginBottom: 24 }}>
-      <h3 style={{ margin: "8px 0" }}>{title}</h3>
-      <div
-        style={{
-          fontSize: 12,
-          background: "#0b1220",
-          color: "#d1d5db",
-          padding: 12,
-          borderRadius: 8,
-          border: "1px solid #1f2937",
-          overflowX: "auto",
-          whiteSpace: "pre",
-        }}
-      >
-        {typeof payload === "string"
-          ? payload
-          : JSON.stringify(payload, null, 2)}
-      </div>
-    </div>
-  );
-
-  const link = (href, label) => (
-    <a
-      href={href}
-      style={{
-        display: "inline-block",
-        marginRight: 12,
-        padding: "8px 12px",
-        borderRadius: 8,
-        border: "1px solid #374151",
-        textDecoration: "none",
-      }}
-    >
-      {label}
-    </a>
-  );
+  const openAndReturn = (href) => {
+    // Navigate but keep a return path back to diagnostics
+    const u = new URL(href, location.origin);
+    u.searchParams.set("return", "/debug/diagnostics");
+    location.href = u.toString();
+  };
 
   return (
-    <div style={{ maxWidth: 960, margin: "24px auto", padding: "0 16px" }}>
-      <h1>Alice OneNote Router — Diagnostics</h1>
-      <p style={{ marginTop: 8, color: "#4b5563" }}>
-        Base URL detected: <code>{base}</code>
-      </p>
+    <html>
+      <head>
+        <title>Alice OneNote Router — Diagnostics</title>
+        <meta charSet="utf-8" />
+        <style>{`
+          body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
+          h1 { margin: 0 0 6px; font-size: 20px; }
+          .sub { color:#666; margin-bottom: 16px; }
+          .row { display:flex; flex-wrap: wrap; gap:8px; margin-bottom: 14px; }
+          button, a.btn {
+            padding:8px 10px; border:1px solid #ccc; background:#fafafa; cursor:pointer; border-radius:6px;
+            text-decoration:none; color:#111; display:inline-block;
+          }
+          button:hover, a.btn:hover { background:#f0f0f0; }
+          pre {
+            background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; overflow:auto;
+            font-size: 12px; line-height: 1.4; max-height: 360px;
+          }
+          .block { margin:16px 0; }
+          .label { font-weight:600; margin:8px 0; }
+        `}</style>
+      </head>
+      <body>
+        <h1>Alice OneNote Router — Diagnostics</h1>
+        <div className="sub">
+          Base URL (detected): <code>{typeof window !== "undefined" ? window.location.origin : ""}</code>
+        </div>
 
-      <div style={{ margin: "12px 0 24px" }}>
-        <Badge ok={flags.envOk} label="Env" />
-        <Badge ok={flags.sessionOk} label="Session" />
-        <Badge ok={flags.tokensOk} label="Tokens" />
-      </div>
+        <div className="row">
+          <button onClick={() => openAndReturn("/api/auth/login?force=1")}>
+            Force Microsoft Login
+          </button>
+          <button onClick={() => (location.href = "/api/debug/clear-cookies?return=/debug/diagnostics")}>
+            Clear Session/Cookies
+          </button>
+          <button onClick={() => (location.href = "/api/auth/logout?return=/debug/diagnostics")}>
+            Logout (App)
+          </button>
+          <a className="btn" href="/">Home</a>
+        </div>
 
-      <div style={{ marginBottom: 16 }}>
-        {link("/api/auth/login?force=1", "Force Microsoft Login")}
-        {link("/api/debug/clear-cookies", "Clear Session/Cookies")}
-        {link("/api/auth/logout", "Logout (App)")}
-        {link("/", "Home")}
-      </div>
+        <div className="row">
+          <button onClick={() => run("env", "/api/debug/env")}>Env (Server)</button>
+          <button onClick={() => run("session", "/api/debug/session")}>Session</button>
+          <button onClick={() => run("tokens", "/api/debug/tokens")}>Tokens</button>
+          <button onClick={() => run("headers", "/api/debug/headers")}>Headers</button>
+          <button onClick={() => run("cookies", "/api/debug/show-cookies")}>Cookies</button>
+        </div>
 
-      <Block title="Environment (/api/debug/env)" payload={env} />
-      <Block title="Session (/api/debug/session)" payload={session} />
-      <Block title="Tokens (/api/debug/tokens)" payload={tokens} />
-      <Block title="Headers (/api/debug/headers)" payload={headers} />
-      <Block title="Cookies (/api/debug/show-cookies)" payload={cookies} />
+        <div className="row">
+          {/* NEW: deep functional checks */}
+          <button onClick={() => run("graph", "/api/debug/test-graph")}>
+            Test Microsoft Graph (/me + OneNote)
+          </button>
+        </div>
 
-      <p style={{ color: "#6b7280", fontSize: 12 }}>
-        Tip: Use this page in a **Private/Incognito window** when testing auth,
-        to avoid stale PKCE/cookies.
-      </p>
-    </div>
+        <div className="block">
+          <div className="label">Environment (/api/debug/env)</div>
+          <pre id="env">Click a button to load…</pre>
+        </div>
+
+        <div className="block">
+          <div className="label">Session (/api/debug/session)</div>
+          <pre id="session">Click a button to load…</pre>
+        </div>
+
+        <div className="block">
+          <div className="label">Tokens (/api/debug/tokens)</div>
+          <pre id="tokens">Click a button to load…</pre>
+        </div>
+
+        <div className="block">
+          <div className="label">Headers (/api/debug/headers)</div>
+          <pre id="headers">Click a button to load…</pre>
+        </div>
+
+        <div className="block">
+          <div className="label">Cookies (/api/debug/show-cookies)</div>
+          <pre id="cookies">Click a button to load…</pre>
+        </div>
+
+        <div className="block">
+          <div className="label">Graph Test (/api/debug/test-graph)</div>
+          <pre id="graph">Click “Test Microsoft Graph” above…</pre>
+        </div>
+      </body>
+    </html>
   );
 }
