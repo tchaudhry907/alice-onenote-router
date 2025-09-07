@@ -1,9 +1,11 @@
-import { requireAuth, getAccessToken } from "@/lib/auth";
+// pages/api/onenote/log.js
+import { getBoundAccessToken } from "@/lib/auth";
 import { get as kvGet, set as kvSet } from "@/lib/kv";
 import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
+/** HTML-escape to keep fragments safe */
 function htmlEscape(s = "") {
-  return s
+  return String(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
@@ -25,37 +27,29 @@ async function createDailyPage(accessToken, sectionId, initialHtml) {
       <hr/>
     </body></html>`;
 
-  const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
-      sectionId
-    )}/pages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "text/html",
-      },
-      body: html,
-    }
-  );
+  const url = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
+    sectionId
+  )}/pages`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "text/html",
+    },
+    body: html,
+  });
 
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(JSON.stringify({ status: res.status, body: j }));
-  }
-  return j; // includes id, links, etc.
+  if (!res.ok) throw new Error(JSON.stringify({ status: res.status, body: j }));
+  return j; // includes id, title, links...
 }
 
 async function appendToPage(accessToken, pageId, htmlFragment) {
-  // Build a correct multipart/related PATCH with a part NAMED "commands"
+  // OneNote requires a multipart PATCH with a part named "commands"
   const boundary = "batch_" + Date.now();
   const commands = [
-    {
-      target: "body",
-      action: "append",
-      position: "after",
-      content: htmlFragment,
-    },
+    { target: "body", action: "append", position: "after", content: htmlFragment },
   ];
 
   const body =
@@ -81,36 +75,40 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      JSON.stringify({ status: res.status, body: text || "(no body)" })
-    );
+    throw new Error(JSON.stringify({ status: res.status, body: text || "(no body)" }));
   }
 }
 
-export default requireAuth(async function handler(req, res, session) {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
-    const { text } = req.body || {};
-    if (!text) {
-      return res.status(400).json({ ok: false, error: "Missing text" });
+    const accessToken = await getBoundAccessToken(); // <-- no browser session required
+    if (!accessToken) {
+      return res
+        .status(401)
+        .json({ ok: false, error: "Not bound. Visit /api/cron/bind once while signed in." });
     }
 
-    const accessToken = await getAccessToken(session);
+    const { text, sectionId: sectionIdInBody } = req.body || {};
     const sectionId =
+      sectionIdInBody ||
       process.env.ONE_NOTE_INBOX_SECTION_ID ||
       ONE_NOTE_INBOX_SECTION_ID ||
-      "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // your Inbox (fallback)
+      "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // your Inbox fallback
+
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ ok: false, error: "Missing text" });
+    }
 
     const title = todayTitle();
     const kvKey = `daily:page:${title}`;
 
-    // Try to reuse today’s page id from KV
+    // reuse today's page if we already created it
     let pageId = await kvGet(kvKey);
 
-    // If no cached page, create it in Inbox
     if (!pageId) {
       const created = await createDailyPage(
         accessToken,
@@ -122,9 +120,7 @@ export default requireAuth(async function handler(req, res, session) {
       await kvSet(kvKey, pageId);
     }
 
-    // Append the new line
-    const safe = htmlEscape(String(text));
-    const fragment = `<p>${safe}</p>`;
+    const fragment = `<p>${htmlEscape(text)}</p>`;
     await appendToPage(accessToken, pageId, fragment);
 
     return res.status(200).json({ ok: true, pageId, title });
@@ -132,8 +128,13 @@ export default requireAuth(async function handler(req, res, session) {
     return res.status(400).json({
       ok: false,
       error: "Append failed",
-      detail:
-        typeof err?.message === "string" ? JSON.parse(err.message) : String(err),
+      detail: (() => {
+        try {
+          return JSON.parse(err?.message || "");
+        } catch {
+          return String(err?.message || err);
+        }
+      })(),
     });
   }
-});
+}
