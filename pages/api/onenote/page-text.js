@@ -1,89 +1,81 @@
-// pages/api/onenote/page-text.js
 import { requireAuth, getAccessToken } from "@/lib/auth";
 
-/**
- * Fetches the raw HTML of a OneNote page via Microsoft Graph and returns a plain-text extraction.
- * We call Graph directly:
- *   GET https://graph.microsoft.com/v1.0/me/onenote/pages/{id}/content?includeIDs=true
- *
- * Returns: { ok: true, id, title?, text, bytes }
- */
-function htmlToPlainText(html = "") {
+function htmlToText(html) {
+  // very small, dependency-free HTML → text
   try {
-    // Remove scripts/styles
-    html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
-    html = html.replace(/<style[\s\S]*?<\/style>/gi, "");
-    // Replace <br> and block tags with newlines
-    html = html.replace(/<(?:br|BR)\s*\/?>/g, "\n");
-    html = html.replace(/<\/(p|div|h[1-6]|li|ul|ol|table|tr|td|th)>/gi, "\n");
-    // Strip the rest of tags
-    html = html.replace(/<[^>]+>/g, "");
-    // Decode minimal entities
+    // remove scripts/styles
+    html = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+    html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+
+    // convert breaks/headings to newlines (keeps some structure)
     html = html
+      .replace(/<(h[1-6]|p|div|li|br|tr|table|section|article|hr)\b[^>]*>/gi, "\n$&");
+
+    // strip tags
+    let text = html.replace(/<[^>]+>/g, " ");
+
+    // decode a few entities quickly
+    text = text
       .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
       .replace(/&lt;/g, "<")
       .replace(/&gt;/g, ">")
-      .replace(/&amp;/g, "&")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
-    // Collapse excessive whitespace
-    html = html.replace(/\r/g, "");
-    html = html.replace(/\n{3,}/g, "\n\n");
-    html = html.trim();
-    return html;
+      .replace(/&#39;|&apos;/g, "'")
+      .replace(/&quot;/g, '"');
+
+    // collapse whitespace
+    text = text.replace(/\s+\n/g, "\n").replace(/\n\s+/g, "\n");
+    text = text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+
+    return text;
   } catch {
     return "";
   }
 }
 
 export default requireAuth(async function handler(req, res, session) {
+  if (req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
+  const { id } = req.query || {};
+  if (!id) {
+    return res.status(400).json({ ok: false, error: "Missing ?id=" });
+  }
+
   try {
-    const id =
-      req.method === "GET"
-        ? req.query?.id
-        : (req.body && req.body.id) || req.query?.id;
-
-    if (!id || typeof id !== "string") {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing required 'id' parameter" });
-    }
-
     const accessToken = await getAccessToken(session);
-
-    // IMPORTANT: call Graph content endpoint directly (NOT the web link)
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
-      id
-    )}/content?includeIDs=true`;
-
-    const r = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        // Let Graph return HTML; do NOT follow OneDrive web redirects
-        Accept: "text/html",
-      },
-    });
-
-    const raw = await r.text().catch(() => "");
-    if (!r.ok) {
-      return res
-        .status(r.status)
-        .json({ ok: false, error: raw || `(status ${r.status})` });
+    if (!accessToken) {
+      return res.status(401).json({ ok: false, error: "Not authenticated" });
     }
 
-    const text = htmlToPlainText(raw);
-    return res.status(200).json({
-      ok: true,
-      id,
-      text,
-      bytes: raw.length,
+    // Always URL-encode the OneNote page id (the id contains '!' characters)
+    const encId = encodeURIComponent(String(id));
+
+    // Ask Graph for the HTML content; includeIDs=true usually keeps element ids
+    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encId}/content?includeIDs=true`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
+
+    const ct = resp.headers.get("content-type") || "";
+    const body = await resp.text();
+
+    if (!resp.ok) {
+      // Bubble up Graph’s error body to help debugging
+      return res
+        .status(resp.status)
+        .json({ ok: false, error: body || `Graph error ${resp.status}` });
+    }
+
+    // If Graph returned HTML, strip it; otherwise just return raw
+    const isHtml = ct.includes("text/html") || body.trim().startsWith("<");
+    const text = isHtml ? htmlToText(body) : body;
+
+    return res.status(200).json({ ok: true, id, contentType: ct, text });
   } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      error:
-        typeof err?.message === "string" ? err.message : "Unhandled server error",
-    });
+    const msg =
+      typeof err?.message === "string" ? err.message : String(err || "Unknown error");
+    return res.status(500).json({ ok: false, error: msg });
   }
 });
