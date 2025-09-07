@@ -1,8 +1,9 @@
 // pages/debug/diagnostics.js
-// Fast, one-click diagnostics with auto login flow & token polling.
+// SSR-safe diagnostics with one-click reset+login and token polling.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+// ---- CONFIG ----
 const APP_BASE = "https://alice-onenote-router.vercel.app";
 
 const btn = {
@@ -109,7 +110,11 @@ async function jget(path) {
   }
 }
 
+// Force this page to be rendered dynamically (avoid static export errors)
+export const getServerSideProps = async () => ({ props: {} });
+
 export default function Diagnostics() {
+  // State
   const [env, setEnv] = useState(null);
   const [session, setSession] = useState(null);
   const [tokens, setTokens] = useState(null);
@@ -117,12 +122,13 @@ export default function Diagnostics() {
   const [cookies, setCookies] = useState(null);
   const [busy, setBusy] = useState(false);
   const [noteMsg, setNoteMsg] = useState("");
+  const [after, setAfter] = useState(null); // replaces direct use of location.search
   const pollingRef = useRef(null);
 
-  const qs = useMemo(
-    () => Object.fromEntries(new URLSearchParams(location.search)),
-    []
-  );
+  // Helpers
+  function nav(url) {
+    if (typeof window !== "undefined") window.location.href = url;
+  }
 
   async function loadAll() {
     const [e, s, t, h, c] = await Promise.all([
@@ -139,10 +145,6 @@ export default function Diagnostics() {
     setCookies(c);
   }
 
-  function open(url) {
-    window.location.href = url;
-  }
-
   async function clearCookies() {
     setBusy(true);
     try {
@@ -152,7 +154,7 @@ export default function Diagnostics() {
     setBusy(false);
   }
 
-  // One-click: clear app cookies -> MS logout -> bounce back here -> auto-login
+  // One-click: clear app cookies -> MS logout -> bounce back here -> auto-start login
   async function hardResetAndLogin() {
     setBusy(true);
     try {
@@ -162,20 +164,20 @@ export default function Diagnostics() {
     const msLogout =
       "https://login.microsoftonline.com/common/oauth2/v2.0/logout" +
       `?post_logout_redirect_uri=${encodeURIComponent(postBack)}`;
-    open(msLogout);
+    nav(msLogout);
   }
 
   function forceMicrosoftLogin() {
-    open("/api/auth/login");
+    nav("/api/auth/login");
   }
   function refreshTokens() {
-    open("/api/auth/refresh");
+    nav("/api/auth/refresh");
   }
   function logoutApp() {
-    open("/api/auth/logout");
+    nav("/api/auth/logout");
   }
 
-  // Poll tokens after returning from login to avoid manual reload spam
+  // Poll tokens after returning from login
   async function startTokenPolling(timeoutMs = 10000, everyMs = 1200) {
     const start = Date.now();
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -215,33 +217,37 @@ export default function Diagnostics() {
     }
   }
 
-  // Initial load
+  // On mount (browser only): parse ?after=, load panels
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      const q = new URLSearchParams(window.location.search);
+      const a = q.get("after");
+      setAfter(a);
+    }
     loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If we came back with ?after=login, auto-kick login once
+  // If we came back with ?after=login, clean URL and trigger login once
   useEffect(() => {
-    if (qs.after === "login") {
-      // Replace the URL (nice UX), then trigger login
-      const clean = new URL(location.href);
+    if (after === "login" && typeof window !== "undefined") {
+      const clean = new URL(window.location.href);
       clean.searchParams.delete("after");
-      history.replaceState(null, "", clean.toString());
-      // Immediately send to our login route
+      window.history.replaceState(null, "", clean.toString());
       forceMicrosoftLogin();
     }
-  }, [qs.after]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [after]);
 
-  // If we arrive to this page from /api/auth/callback, tokens may
-  // land a split-second later — poll quickly to surface them.
+  // Start token polling if tokens not yet present (browser only)
   useEffect(() => {
-    // Heuristic: if tokens currently null, poll for up to 10s
+    if (typeof window === "undefined") return;
     if (!tokens?.refresh_token) startTokenPolling();
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tokens?.refresh_token]);
 
   const tokenSummary =
     tokens && (tokens.refresh_token || tokens.access_token || tokens.id_token)
@@ -324,7 +330,7 @@ export default function Diagnostics() {
       </Section>
 
       <div style={{ marginTop: 18, fontSize: 13, color: "#888" }}>
-        Tip: If Tokens stay null, open this page in an **Incognito window** and press
+        Tip: If Tokens stay null, open this page in an <b>Incognito window</b> and press
         <b> Hard Reset + Login</b>. That guarantees a fresh Microsoft prompt.
       </div>
     </div>
