@@ -1,105 +1,139 @@
-// /pages/api/onenote/log.js
-// POST { text: string, sectionId?: string }
-// Appends to today's "Daily Log — YYYY-MM-DD" page (creates if needed).
-// After successful write, it indexes (caches) the page content for fast future search.
+import { requireAuth, getAccessToken } from "@/lib/auth";
+import { get as kvGet, set as kvSet } from "@/lib/kv";
+import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
-import { kv } from "@/lib/kv";
-import { exchangeRefreshToken, graphFetch } from "@/lib/msgraph";
-import { indexPage } from "@/lib/indexer";
+function htmlEscape(s = "") {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
-export const config = { api: { bodyParser: true } };
+function todayTitle() {
+  const d = new Date();
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `Daily Log — ${yyyy}-${mm}-${dd}`;
+}
 
-export default async function handler(req, res) {
+async function createDailyPage(accessToken, sectionId, initialHtml) {
+  const html =
+    initialHtml ||
+    `<html><head><title>${todayTitle()}</title></head><body>
+      <h1>${todayTitle()}</h1>
+      <hr/>
+    </body></html>`;
+
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
+      sectionId
+    )}/pages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "text/html",
+      },
+      body: html,
+    }
+  );
+
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(JSON.stringify({ status: res.status, body: j }));
+  }
+  return j; // includes id, links, etc.
+}
+
+async function appendToPage(accessToken, pageId, htmlFragment) {
+  // Build a correct multipart/related PATCH with a part NAMED "commands"
+  const boundary = "batch_" + Date.now();
+  const commands = [
+    {
+      target: "body",
+      action: "append",
+      position: "after",
+      content: htmlFragment,
+    },
+  ];
+
+  const body =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json\r\n` +
+    `Content-Disposition: form-data; name="commands"\r\n\r\n` +
+    JSON.stringify(commands) +
+    `\r\n--${boundary}--`;
+
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+      pageId
+    )}/content`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      JSON.stringify({ status: res.status, body: text || "(no body)" })
+    );
+  }
+}
+
+export default requireAuth(async function handler(req, res, session) {
   if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Use POST with JSON { text, sectionId? }" });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
-    const body = (req.body && typeof req.body === "object") ? req.body : {};
-    const text = (body.text || "").toString().trim();
-    if (!text) return res.status(400).json({ ok: false, error: "Missing text" });
-
-    // Auth via refresh
-    const savedRefresh = await kv.get("alice:cron:refresh");
-    if (!savedRefresh) return res.status(400).json({ ok: false, error: "Not bound. Visit /api/cron/bind while signed in." });
-    const { access_token } = await exchangeRefreshToken(savedRefresh);
-
-    // Resolve sectionId: provided or default
-    let sectionId = body.sectionId;
-    if (!sectionId) {
-      const defaultId = await kv.get("DEFAULT_SECTION_ID");
-      sectionId = defaultId || process.env.DEFAULT_SECTION_ID || null;
-    }
-    if (!sectionId) return res.status(400).json({ ok: false, error: "No sectionId. Pass sectionId or set DEFAULT_SECTION_ID." });
-
-    // Find/create today's page in section
-    const todayTitle = `Daily Log — ${new Date().toISOString().slice(0,10)}`;
-
-    // Try to find a page with today's title in this section
-    // (Graph lacks direct filter here; we list a few recent pages in the section)
-    const pagesUrl = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(sectionId)}/pages?$top=20&$orderby=createdDateTime desc&$select=id,title,createdDateTime`;
-    let pr = await graphFetch(access_token, pagesUrl);
-    let pJson = safeJson(await pr.text());
-    if (!pr.ok || !pJson) return res.status(502).json({ ok: false, error: "List section pages failed" });
-
-    let page = (pJson.value || []).find(p => (p.title || "").trim() === todayTitle);
-
-    // Create if missing
-    if (!page) {
-      const html = `
-        <!DOCTYPE html>
-        <html>
-          <head><title>${escapeHtml(todayTitle)}</title></head>
-          <body>
-            <p>Created: ${new Date().toLocaleString()}</p>
-            <hr/>
-          </body>
-        </html>`;
-      const createUrl = `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(sectionId)}/pages`;
-      const cr = await fetch(createUrl, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${access_token}`, "Content-Type": "text/html" },
-        body: html
-      });
-      const cText = await cr.text();
-      const cJson = safeJson(cText);
-      if (!cr.ok || !cJson?.id) {
-        return res.status(502).json({ ok: false, error: "Create page failed", detail: { status: cr.status, body: cText.slice(0, 400) } });
-      }
-      page = cJson;
+    const { text } = req.body || {};
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "Missing text" });
     }
 
-    // Append text as a new paragraph
-    const appendUrl = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(page.id)}/content`;
-    const appendHtml = `
-      <html>
-        <body>
-          <p>${escapeHtml(text)} <span style="color:#777;font-size:10px;">(${new Date().toLocaleString()})</span></p>
-        </body>
-      </html>`;
-    const ar = await fetch(appendUrl, {
-      method: "PATCH",
-      headers: { "Authorization": `Bearer ${access_token}`, "Content-Type": "application/xhtml+xml" },
-      body: appendHtml
+    const accessToken = await getAccessToken(session);
+    const sectionId =
+      process.env.ONE_NOTE_INBOX_SECTION_ID ||
+      ONE_NOTE_INBOX_SECTION_ID ||
+      "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // your Inbox (fallback)
+
+    const title = todayTitle();
+    const kvKey = `daily:page:${title}`;
+
+    // Try to reuse today’s page id from KV
+    let pageId = await kvGet(kvKey);
+
+    // If no cached page, create it in Inbox
+    if (!pageId) {
+      const created = await createDailyPage(
+        accessToken,
+        sectionId,
+        `<html><head><title>${title}</title></head><body><h1>${title}</h1><hr/></body></html>`
+      );
+      pageId = created?.id;
+      if (!pageId) throw new Error("Create page returned no id");
+      await kvSet(kvKey, pageId);
+    }
+
+    // Append the new line
+    const safe = htmlEscape(String(text));
+    const fragment = `<p>${safe}</p>`;
+    await appendToPage(accessToken, pageId, fragment);
+
+    return res.status(200).json({ ok: true, pageId, title });
+  } catch (err) {
+    return res.status(400).json({
+      ok: false,
+      error: "Append failed",
+      detail:
+        typeof err?.message === "string" ? JSON.parse(err.message) : String(err),
     });
-    if (!ar.ok) {
-      const aText = await ar.text();
-      return res.status(502).json({ ok: false, error: "Append failed", detail: { status: ar.status, body: aText.slice(0, 400) } });
-    }
-
-    // Refresh the cache for this page so searches see it immediately
-    try { await indexPage(access_token, page.id); } catch {}
-
-    return res.status(200).json({ ok: true, pageId: page.id, title: todayTitle, sectionIdUsed: sectionId });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-}
-
-function safeJson(t) { try { return JSON.parse(t); } catch { return null; } }
-function escapeHtml(s) {
-  return (s || "").toString()
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
+});
