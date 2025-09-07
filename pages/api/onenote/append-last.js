@@ -2,7 +2,6 @@
 import { get as kvGet } from "@/lib/kv";
 import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
-/** Read the bound access token directly from KV (same key your create endpoint uses). */
 async function getAccessTokenFromKV() {
   const blob = await kvGet("msauth:default"); // { access, refresh, id }
   const token = blob?.access;
@@ -17,7 +16,6 @@ function htmlEscape(s = "") {
 }
 
 async function fetchLatestPageId(accessToken) {
-  // Prefer the Inbox section (fast + predictable) and take the most-recent page
   const secId =
     process.env.ONE_NOTE_INBOX_SECTION_ID ||
     ONE_NOTE_INBOX_SECTION_ID ||
@@ -46,18 +44,19 @@ async function fetchLatestPageId(accessToken) {
 }
 
 async function appendToPage(accessToken, pageId, htmlFragment) {
-  // OneNote multipart/related PATCH: the single part MUST be named "commands"
+  // OneNote requires multipart/related; the JSON part must be named "Commands"
   const boundary = "batch_" + Date.now();
+
   const commands = [
-    { target: "body", action: "append", position: "after", content: htmlFragment },
+    { target: "body", action: "append", position: "after", content: htmlFragment }
   ];
 
   const body =
     `--${boundary}\r\n` +
-    `Content-Type: application/json\r\n` +
-    `Content-Disposition: form-data; name="commands"\r\n\r\n` +
-    JSON.stringify(commands) +
-    `\r\n--${boundary}--`;
+    `Content-Type: application/json; charset=utf-8\r\n` +
+    `Content-Disposition: form-data; name="Commands"\r\n\r\n` + // Capital C
+    JSON.stringify(commands) + `\r\n` +
+    `--${boundary}--`;
 
   const res = await fetch(
     `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`,
@@ -73,13 +72,7 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
 
   const text = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(
-      JSON.stringify({
-        status: res.status,
-        body: text || "(no body)",
-        stage: "appendToPage",
-      })
-    );
+    throw new Error(JSON.stringify({ status: res.status, body: text || "(no body)", stage: "appendToPage" }));
   }
 }
 
@@ -95,14 +88,11 @@ export default async function handler(req, res) {
 
     const accessToken = await getAccessTokenFromKV();
     if (!accessToken) {
-      return res
-        .status(401)
-        .json({ ok: false, error: "Not authenticated (no bound access token in KV)" });
+      return res.status(401).json({ ok: false, error: "Not authenticated (no bound access token in KV)" });
     }
 
     const pageId = await fetchLatestPageId(accessToken);
-    const safe = htmlEscape(String(text));
-    const fragment = `<p>${safe}</p>`;
+    const fragment = `<p>${htmlEscape(String(text))}</p>`;
     await appendToPage(accessToken, pageId, fragment);
 
     return res.status(200).json({ ok: true, pageId });
@@ -111,7 +101,7 @@ export default async function handler(req, res) {
     try {
       const m = typeof err?.message === "string" ? err.message : String(err);
       detail = JSON.parse(m);
-    } catch (_) {}
+    } catch {}
     return res.status(400).json({ ok: false, error: "Append failed", detail });
   }
 }
