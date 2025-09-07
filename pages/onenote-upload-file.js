@@ -1,19 +1,24 @@
-// /pages/onenote-upload.js
+// /pages/onenote-upload-file.js
 import { useState } from "react";
 
-export default function OneNoteUpload() {
-  const [title, setTitle] = useState("Alice Router — Upload Test");
-  const [body, setBody] = useState("<p>Hello from Alice Router!</p>");
+export default function OneNoteUploadFile() {
+  const [title, setTitle] = useState("Alice Router — Upload with Attachment");
+  const [body, setBody] = useState("<p>Hello from Alice Router with a file attached.</p>");
+  const [file, setFile] = useState(null);
   const [result, setResult] = useState("");
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setResult("Submitting...");
 
-    const res = await fetch("/api/onenote/page-create", {
+    const formData = new FormData();
+    formData.append("title", title);
+    formData.append("body", body);
+    if (file) formData.append("file", file);
+
+    const res = await fetch("/api/onenote/page-create-file", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, body }),
+      body: formData,
     });
 
     const json = await res.json();
@@ -22,8 +27,8 @@ export default function OneNoteUpload() {
 
   return (
     <div style={{ padding: 20 }}>
-      <h1>Alice OneNote Router — Upload</h1>
-      <p>Creates a OneNote page in your default section.</p>
+      <h1>Alice OneNote Router — File Upload</h1>
+      <p>Uploads a page to your default section with the selected file(s) attached.</p>
       <form onSubmit={handleSubmit}>
         <div>
           <label>Title</label>
@@ -42,10 +47,14 @@ export default function OneNoteUpload() {
             style={{ width: "100%", marginBottom: 10 }}
           />
         </div>
-        <button type="submit">Create Page</button>
+        <div>
+          <label>Attach file(s)</label>
+          <input type="file" onChange={(e) => setFile(e.target.files[0])} />
+        </div>
+        <button type="submit">Create Page (with Attachment)</button>
       </form>
       <div style={{ marginTop: 20 }}>
-        <a href="/api/auth/login?state=/onenote-upload">Sign in</a>
+        <a href="/api/auth/login?state=/onenote-upload-file">Sign in</a>
       </div>
       <pre
         style={{
