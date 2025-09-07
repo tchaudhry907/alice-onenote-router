@@ -1,186 +1,240 @@
 // pages/api/onenote/log.js
-import { get as kvGet, set as kvSet } from "@/lib/kv";
-import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
+// Full replacement — append a line to today's OneNote page using Graph JSON commands (no multipart)
+
+import { NextResponse } from 'next/server';
+
+// ==== Config you can tweak if you want ====
+const DEFAULT_NOTEBOOK_NAME = process.env.ONE_NOTE_NOTEBOOK_NAME || 'Alice Router';
+const DEFAULT_SECTION_NAME  = process.env.ONE_NOTE_SECTION_NAME  || 'Router Logs';
+// ==========================================
 
 /**
- * Tiny HTML escaper
+ * Minimal Upstash KV REST helpers (uses standard Vercel env names already in your project)
  */
-function htmlEscape(s = "") {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+const KV_URL   = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+async function kvGet(key) {
+  if (!KV_URL || !KV_TOKEN) throw new Error('KV not configured');
+  const r = await fetch(`${KV_URL}/get/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${KV_TOKEN}` },
+    cache: 'no-store',
+  });
+  const j = await r.json();
+  return j?.result ?? null; // Upstash returns { result: "..." } or null
+}
+async function kvSet(key, value) {
+  if (!KV_URL || !KV_TOKEN) throw new Error('KV not configured');
+  const r = await fetch(`${KV_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`, {
+    headers: { Authorization: `Bearer ${KV_TOKEN}` },
+    cache: 'no-store',
+  });
+  return r.ok;
 }
 
-/**
- * Daily page title in UTC (to keep one page per day)
- */
-function todayTitle() {
-  const d = new Date();
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `Daily Log — ${yyyy}-${mm}-${dd}`;
+function json(res, status = 200) {
+  return new Response(JSON.stringify(res), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
 }
 
-/**
- * Get the MS Graph access token from KV (key: "msauth:default")
- * Shape expected:
- *   {
- *     "access": "<access_token string>",
- *     "refresh": "<refresh_token string>",
- *     "id": "<id_token string>"
- *   }
- */
-async function getAccessTokenFromKV() {
-  const raw = await kvGet("msauth:default");
-  if (!raw) return null;
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return parsed?.access || null;
-  } catch {
-    return null;
+function todayYMD(tz = 'America/New_York') {
+  const now = new Date();
+  const y = now.toLocaleString('en-CA', { timeZone: tz, year: 'numeric' });
+  const m = now.toLocaleString('en-CA', { timeZone: tz, month: '2-digit' });
+  const d = now.toLocaleString('en-CA', { timeZone: tz, day: '2-digit' });
+  return `${y}-${m}-${d}`;
+}
+
+async function graphFetch(path, { method = 'GET', accessToken, headers = {}, body } = {}) {
+  if (!accessToken) throw new Error('Missing access token');
+  const url = path.startsWith('http') ? path : `https://graph.microsoft.com/v1.0${path}`;
+  const r = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+      ...headers,
+    },
+    body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined,
+    cache: 'no-store',
+  });
+
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    const err = new Error(`Graph ${method} ${path} failed: ${r.status}`);
+    err.status = r.status;
+    err.body = text;
+    throw err;
   }
+  if (r.status === 204) return null;
+  return r.json();
 }
 
-async function createDailyPage(accessToken, sectionId, initialHtml) {
+// Ensure notebook exists (by displayName)
+async function ensureNotebook(accessToken, name = DEFAULT_NOTEBOOK_NAME) {
+  const list = await graphFetch(`/me/onenote/notebooks?$select=id,displayName`, { accessToken });
+  let nb = list.value.find(n => n.displayName === name);
+  if (nb) return nb;
+
+  // Create notebook
+  // Notebook creation is under /me/onenote/notebooks (POST, body { displayName })
+  nb = await graphFetch(`/me/onenote/notebooks`, {
+    method: 'POST',
+    accessToken,
+    body: { displayName: name },
+  });
+  return nb;
+}
+
+// Ensure section exists within a notebook
+async function ensureSection(accessToken, notebookId, sectionName = DEFAULT_SECTION_NAME) {
+  const list = await graphFetch(`/me/onenote/notebooks/${notebookId}/sections?$select=id,displayName`, { accessToken });
+  let sec = list.value.find(s => s.displayName === sectionName);
+  if (sec) return sec;
+
+  sec = await graphFetch(`/me/onenote/notebooks/${notebookId}/sections`, {
+    method: 'POST',
+    accessToken,
+    body: { displayName: sectionName },
+  });
+  return sec;
+}
+
+// Find or create today's page in the section
+async function ensureTodaysPage(accessToken, sectionId, ymd) {
+  const pages = await graphFetch(`/me/onenote/sections/${sectionId}/pages?$select=id,title,createdDateTime&top=50`, { accessToken });
+  const title = `Router — ${ymd}`;
+  let page = pages.value.find(p => p.title === title);
+  if (page) return page;
+
+  // Create a simple HTML page
   const html =
-    initialHtml ||
-    `<html><head><title>${todayTitle()}</title></head><body>
-      <h1>${todayTitle()}</h1>
-      <hr/>
-    </body></html>`;
+    `<!DOCTYPE html><html><head><title>${title}</title><meta name="created" content="${new Date().toISOString()}"/></head>` +
+    `<body><h1>${title}</h1><p>Log started ${new Date().toLocaleString()}</p></body></html>`;
 
-  const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
-      sectionId
-    )}/pages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "text/html",
-      },
-      body: html,
-    }
-  );
+  const r = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/sections/${sectionId}/pages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'text/html',
+    },
+    body: html,
+  });
 
-  const j = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(
-      JSON.stringify({
-        status: res.status,
-        body: j,
-        stage: "createDailyPage",
-      })
-    );
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    const err = new Error(`Create page failed: ${r.status}`);
+    err.status = r.status;
+    err.body = text;
+    throw err;
   }
-  return j; // includes id, links, etc.
+  return r.json();
 }
 
-async function appendToPage(accessToken, pageId, htmlFragment) {
-  // OneNote requires a multipart/related PATCH with a part named "commands".
-  const boundary = "batch_" + Date.now();
-  const commands = [
+// Append a paragraph line to a page using JSON commands
+async function appendLine(accessToken, pageId, text) {
+  // Escape minimal HTML in text and wrap as a paragraph
+  const safe = String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  const content = `<p data-tag="p">${safe}</p>`;
+
+  const body = [
     {
-      target: "body",
-      action: "append",
-      position: "after",
-      content: htmlFragment,
+      target: 'body',
+      action: 'append',
+      position: 'after',
+      content,
     },
   ];
 
-  const body =
-    `--${boundary}\r\n` +
-    `Content-Type: application/json\r\n` +
-    `Content-Disposition: form-data; name="commands"\r\n\r\n` +
-    JSON.stringify(commands) +
-    `\r\n--${boundary}--`;
+  // IMPORTANT: OneNote wants application/json for content commands
+  const r = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
 
-  const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
-      pageId
-    )}/content`,
-    {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": `multipart/related; boundary=${boundary}`,
-      },
-      body,
-    }
-  );
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      JSON.stringify({
-        status: res.status,
-        body: text || "(no body)",
-        stage: "appendToPage",
-      })
-    );
+  if (!r.ok) {
+    const textResp = await r.text().catch(() => '');
+    const err = new Error(`Append failed: ${r.status}`);
+    err.status = r.status;
+    err.body = textResp;
+    throw err;
   }
+  return true;
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
-
+export default async function handler(req) {
   try {
-    const { text } = req.body || {};
-    if (!text) {
-      return res.status(400).json({ ok: false, error: "Missing text" });
+    if (req.method !== 'POST') {
+      return json({ ok: false, error: 'Use POST with JSON { "text": "..." }' }, 405);
     }
 
-    // 1) Get access token straight from KV
-    const accessToken = await getAccessTokenFromKV();
-    if (!accessToken) {
-      return res.status(401).json({
+    const { text } = await (async () => {
+      try { return await req.json(); } catch { return {}; }
+    })();
+
+    if (!text || typeof text !== 'string') {
+      return json({ ok: false, error: 'Missing "text" string in body' }, 400);
+    }
+
+    // 1) Get tokens from KV
+    const raw = await kvGet('msauth:default');
+    if (!raw) {
+      return json({
         ok: false,
-        error:
-          "No access token in KV. Visit /api/auth/refresh (while signed in) then /api/cron/bind, and try again.",
-      });
+        error: 'No tokens in KV. Visit /api/auth/refresh in a logged-in browser first.',
+      }, 401);
     }
 
-    // 2) Resolve Inbox section
-    const sectionId =
-      process.env.ONE_NOTE_INBOX_SECTION_ID ||
-      ONE_NOTE_INBOX_SECTION_ID ||
-      "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // your Inbox fallback
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { /* might already be object-ish */ parsed = raw; }
+    const accessToken = parsed?.access;
+    const refreshToken = parsed?.refresh;
 
-    // 3) Keep/reuse today's page id via KV
-    const title = todayTitle();
-    const kvKey = `daily:page:${title}`;
-    let pageId = await kvGet(kvKey);
-
-    if (!pageId) {
-      const created = await createDailyPage(
-        accessToken,
-        sectionId,
-        `<html><head><title>${title}</title></head><body><h1>${title}</h1><hr/></body></html>`
-      );
-      pageId = created?.id;
-      if (!pageId) throw new Error("Create page returned no id");
-      await kvSet(kvKey, pageId);
+    if (!accessToken) {
+      return json({
+        ok: false,
+        error: 'Missing access token in KV. Go to /api/auth/refresh in your signed-in session.',
+      }, 401);
+    }
+    if (!refreshToken) {
+      // Not fatal for now, but warn
+      console.warn('Warning: no refresh token in KV — future calls may expire.');
     }
 
-    // 4) Append the new line
-    const safe = htmlEscape(String(text));
-    const fragment = `<p>${safe}</p>`;
-    await appendToPage(accessToken, pageId, fragment);
+    // 2) Ensure notebook/section/page
+    const ymd = todayYMD();
+    const nb = await ensureNotebook(accessToken, DEFAULT_NOTEBOOK_NAME);
+    const sec = await ensureSection(accessToken, nb.id, DEFAULT_SECTION_NAME);
+    const page = await ensureTodaysPage(accessToken, sec.id, ymd);
 
-    return res.status(200).json({ ok: true, pageId, title });
-  } catch (err) {
-    let detail = String(err);
-    try {
-      detail = JSON.parse(err?.message || "{}");
-    } catch {}
-    return res.status(400).json({
-      ok: false,
-      error: "Append failed",
-      detail,
+    // 3) Append the line
+    await appendLine(accessToken, page.id, text);
+
+    return json({
+      ok: true,
+      notebook: { id: nb.id, name: nb.displayName },
+      section: { id: sec.id, name: sec.displayName },
+      page: { id: page.id, title: page.title },
+      appended: text,
     });
+  } catch (err) {
+    const status = err?.status || 500;
+    return json({
+      ok: false,
+      error: err?.message || 'Append failed',
+      detail: { status, body: err?.body || null },
+    }, status);
   }
 }
+
+// Ensure the API route is not statically optimized
+export const config = { api: { bodyParser: false } };
