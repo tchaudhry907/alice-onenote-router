@@ -1,23 +1,15 @@
 // pages/api/onenote/quick-log.js
 //
-// Session-based quick logger that supports:
-// - POST JSON:  { "text": "hello" }
-// - GET:        ?text=hello
-//
-// It never reads tokens from KV. It uses the signed session,
-// and if it detects a malformed access token (no '.'), it will
-// call /api/auth/refresh on the server (forwarding cookies) and
-// retry once.
+// Quick logger that works with either GET ?text=... or POST JSON {text}
+// It forces a refresh, then reads tokens directly from KV (msauth:default)
+// to avoid stale/opaque session values. Retries once if Graph returns 401.
 
-import { requireAuth, getAccessToken } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth";
 import { get as kvGet, set as kvSet } from "@/lib/kv";
 import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
 function htmlEscape(s = "") {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function todayTitle() {
@@ -28,12 +20,44 @@ function todayTitle() {
   return `Daily Log — ${yyyy}-${mm}-${dd}`;
 }
 
+function looksJWT(t) {
+  return !!t && typeof t === "string" && t.split(".").length >= 3;
+}
+
+async function refreshServerSide(req) {
+  const base =
+    process.env.APP_BASE_URL ||
+    process.env.NEXT_PUBLIC_APP_BASE_URL ||
+    `https://${req.headers.host}`;
+  await fetch(`${base}/api/auth/refresh`, {
+    method: "POST",
+    headers: { Cookie: req.headers.cookie || "" },
+  }).catch(() => {});
+}
+
+async function getAccessFromKV() {
+  const pack = await kvGet("msauth:default");
+  return pack?.access || null;
+}
+
+async function ensureGoodAccessToken(req) {
+  // 1) Try KV
+  let access = await getAccessFromKV();
+
+  // 2) If not a JWT, force refresh, then re-read
+  if (!looksJWT(access)) {
+    await refreshServerSide(req);
+    access = await getAccessFromKV();
+  }
+
+  return access;
+}
+
 async function createDailyPage(accessToken, sectionId, initialHtml) {
   const html =
     initialHtml ||
     `<html><head><title>${todayTitle()}</title></head><body>
-      <h1>${todayTitle()}</h1>
-      <hr/>
+      <h1>${todayTitle()}</h1><hr/>
     </body></html>`;
 
   const res = await fetch(
@@ -52,9 +76,7 @@ async function createDailyPage(accessToken, sectionId, initialHtml) {
 
   const j = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(
-      JSON.stringify({ status: res.status, body: j, stage: "createDailyPage" })
-    );
+    throw new Error(JSON.stringify({ status: res.status, body: j, stage: "createDailyPage" }));
   }
   return j; // includes id
 }
@@ -66,16 +88,12 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
   ];
 
   const body =
-    `--${boundary}\r\n` +
-    `Content-Type: application/json\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n` +
     `Content-Disposition: form-data; name="commands"\r\n\r\n` +
-    JSON.stringify(commands) +
-    `\r\n--${boundary}--`;
+    JSON.stringify(commands) + `\r\n--${boundary}--`;
 
   const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
-      pageId
-    )}/content`,
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`,
     {
       method: "PATCH",
       headers: {
@@ -88,39 +106,11 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      JSON.stringify({
-        status: res.status,
-        body: text || "(no body)",
-        stage: "appendToPage",
-      })
-    );
+    throw new Error(JSON.stringify({ status: res.status, body: text || "(no body)", stage: "appendToPage" }));
   }
 }
 
-function looksOpaqueOrBad(token) {
-  // Graph access tokens are JWTs (contain two dots). If not, try to refresh.
-  return !token || typeof token !== "string" || token.split(".").length < 3;
-}
-
-async function refreshServerSide(req) {
-  // Call our own refresh endpoint, forwarding incoming cookies.
-  const base =
-    process.env.APP_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_BASE_URL ||
-    `https://${req.headers.host}`;
-  const res = await fetch(`${base}/api/auth/refresh`, {
-    method: "POST",
-    headers: {
-      Cookie: req.headers.cookie || "",
-    },
-  });
-  // ignore body; if it failed, the next getAccessToken() will still fail
-  return res.ok;
-}
-
-export default requireAuth(async function handler(req, res, session) {
-  // Accept POST JSON or GET ?text=...
+export default requireAuth(async function handler(req, res /* session unused here intentionally */) {
   let text;
   if (req.method === "POST") {
     text = req.body?.text;
@@ -147,28 +137,23 @@ export default requireAuth(async function handler(req, res, session) {
   const title = todayTitle();
   const kvKey = `daily:page:${title}`;
 
-  async function doWorkOnce() {
-    // get a token from the session
-    let accessToken = await getAccessToken(session);
-
-    // if it looks wrong/opaque, try a server-side refresh and re-read
-    if (looksOpaqueOrBad(accessToken)) {
-      await refreshServerSide(req);
-      accessToken = await getAccessToken(session);
-    }
-
-    if (looksOpaqueOrBad(accessToken)) {
-      // still bad after refresh
-      const kvProbe = {}; // helpful for your diagnostics
+  async function doOnce() {
+    const accessToken = await ensureGoodAccessToken(req);
+    if (!looksJWT(accessToken)) {
+      const pack = await kvGet("msauth:default").catch(() => null);
       return res.status(401).json({
         ok: false,
         error: "InvalidAuthenticationToken",
-        message: "access token malformed (no JWT) after server refresh",
-        kv: kvProbe,
+        message: "access token malformed (no JWT) after refresh",
+        kv: {
+          access: pack?.access ? `[len:${pack.access.length}]` : null,
+          refresh: pack?.refresh ? `[len:${pack.refresh.length}]` : null,
+          id: pack?.id ? `[len:${pack.id.length}]` : null,
+        },
       });
     }
 
-    // reuse/create today's page
+    // Reuse/create today's page
     let pageId = await kvGet(kvKey);
     if (!pageId) {
       const created = await createDailyPage(
@@ -181,42 +166,30 @@ export default requireAuth(async function handler(req, res, session) {
       await kvSet(kvKey, pageId);
     }
 
-    // append the new line
+    // Append
     const safe = htmlEscape(String(text));
     await appendToPage(accessToken, pageId, `<p>${safe}</p>`);
     return res.status(200).json({ ok: true, pageId, title });
   }
 
   try {
-    await doWorkOnce();
+    await doOnce();
   } catch (err) {
-    // Graph 401s sometimes come from an expired token; refresh once and retry.
-    let retried = false;
+    // If Graph said 401, try one forced refresh + retry
     try {
-      const parsed =
-        typeof err?.message === "string" ? JSON.parse(err.message) : null;
-      if (parsed?.status === 401 && !retried) {
-        retried = true;
+      const parsed = typeof err?.message === "string" ? JSON.parse(err.message) : null;
+      if (parsed?.status === 401) {
         await refreshServerSide(req);
-        await doWorkOnce();
-        return; // success after retry
+        await doOnce();
+        return;
       }
-    } catch {
-      // ignore parse errors and fall through
-    }
-
+    } catch {}
     return res.status(400).json({
       ok: false,
       error: "Append failed",
       detail:
         typeof err?.message === "string"
-          ? (() => {
-              try {
-                return JSON.parse(err.message);
-              } catch {
-                return err.message;
-              }
-            })()
+          ? (() => { try { return JSON.parse(err.message); } catch { return err.message; } })()
           : String(err),
     });
   }
