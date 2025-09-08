@@ -1,110 +1,159 @@
-// pages/quick-log.js
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+type ApiResp =
+  | { ok: true; pageId?: string; title?: string }
+  | { ok: false; error?: string; detail?: any; message?: string };
 
 export default function QuickLog() {
-  const [text, setText] = useState("");
+  const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState("Breakfast: chicken crumble with pancakes — 620 cals, 32g protein. #breakfast #home");
+  const [status, setStatus] = useState<string>("");
+  const [lastId, setLastId] = useState<string | null>(null);
+  const [lastTitle, setLastTitle] = useState<string | null>(null);
 
-  async function submit(e) {
-    e.preventDefault();
-    setBusy(true);
-    setMsg("");
+  const base = useMemo(() => {
+    // Works on Vercel and locally
+    if (typeof window === "undefined") return "";
+    const u = new URL(window.location.href);
+    return `${u.protocol}//${u.host}`;
+  }, []);
+
+  async function callJSON(url: string, init?: RequestInit) {
+    const res = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers || {}) }, cache: "no-store" });
+    const text = await res.text();
     try {
-      const r = await fetch("/api/onenote/quick-log", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j?.ok) {
-        setMsg(`❌ ${j?.error || "Failed"} ${j?.detail ? JSON.stringify(j.detail) : ""}`);
-      } else {
-        setMsg(`✅ Logged to "${j.title}".`);
-        setText("");
-      }
-    } catch (e) {
-      setMsg(`❌ ${String(e)}`);
-    } finally {
-      setBusy(false);
+      return JSON.parse(text);
+    } catch {
+      return { ok: false, error: `Non-JSON from ${url}`, detail: text } as ApiResp;
     }
   }
 
-  async function fallbackGet(e) {
-    e.preventDefault();
-    setBusy(true);
-    setMsg("");
-    try {
-      // Fallback path: GET ?text=...
-      const url = new URL("/api/onenote/quick-log", location.origin);
-      url.searchParams.set("text", text);
-      const r = await fetch(url.toString(), { method: "GET" });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j?.ok) {
-        setMsg(`❌ (GET fallback) ${j?.error || "Failed"} ${j?.detail ? JSON.stringify(j.detail) : ""}`);
-      } else {
-        setMsg(`✅ (GET fallback) Logged to "${j.title}".`);
-        setText("");
-      }
-    } catch (e) {
-      setMsg(`❌ ${String(e)}`);
-    } finally {
-      setBusy(false);
+  async function bootstrap() {
+    setStatus("Warming up…");
+    // 1) ping
+    await fetch(`${base}/api/ok`, { cache: "no-store" }).catch(() => {});
+    // 2) refresh tokens → cookies + KV
+    const r = await callJSON(`${base}/api/auth/refresh`, { method: "POST" });
+    if ((r as any)?.ok) {
+      setStatus("Ready");
+      setReady(true);
+    } else {
+      setStatus(`Auth refresh failed: ${JSON.stringify(r)}`);
     }
+  }
+
+  useEffect(() => {
+    if (base) bootstrap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [base]);
+
+  async function doLog() {
+    if (!ready || !msg.trim()) return;
+    setBusy(true);
+    setStatus("Logging…");
+    const resp = (await callJSON(`${base}/api/onenote/quick-log`, {
+      method: "POST",
+      body: JSON.stringify({ text: msg.trim() }),
+    })) as ApiResp;
+
+    if (resp.ok) {
+      setStatus("Logged ✓  (fetching latest page…)");
+
+      // Optional: fetch latest page to confirm id/title
+      const latest = await callJSON(`${base}/api/onenote/page-latest`);
+      if (latest?.ok) {
+        setLastId(latest.id);
+        setLastTitle(latest.title);
+        setStatus(`Logged ✓  → ${latest.title}`);
+      } else {
+        setStatus("Logged ✓");
+      }
+    } else {
+      setStatus(`❌ ${resp.error || resp.message || "Append failed"}`);
+    }
+
+    setBusy(false);
   }
 
   return (
-    <div style={{ maxWidth: 640, margin: "40px auto", fontFamily: "system-ui, sans-serif" }}>
-      <h1>Quick Log → OneNote</h1>
-      <p>Type a line (e.g., <em>“Breakfast: oatmeal 300 cals.”</em>) and hit Log.</p>
+    <div style={{ maxWidth: 680, margin: "40px auto", fontFamily: "ui-sans-serif, system-ui, -apple-system" }}>
+      <h1 style={{ fontSize: 26, marginBottom: 8 }}>Quick Log → OneNote</h1>
+      <p style={{ color: "#555", marginTop: 0 }}>
+        Type a natural note (meal, steps, workout). I’ll refresh tokens and append to your daily OneNote page.
+      </p>
 
-      <form onSubmit={submit}>
+      <div style={{ margin: "16px 0", padding: 12, border: "1px solid #e5e7eb", borderRadius: 12 }}>
+        <label style={{ display: "block", fontSize: 13, color: "#444", marginBottom: 6 }}>Entry</label>
         <textarea
-          rows={3}
-          style={{ width: "100%", padding: 12, fontSize: 16 }}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Your entry…"
+          value={msg}
+          onChange={(e) => setMsg(e.target.value)}
+          rows={4}
+          placeholder='e.g. "Lunch: turkey wrap 420 cals. #lunch #home"'
+          style={{
+            width: "100%",
+            border: "1px solid #e5e7eb",
+            borderRadius: 8,
+            padding: 10,
+            fontSize: 15,
+            outline: "none",
+          }}
         />
-        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button
-            type="submit"
-            disabled={busy || !text.trim()}
+            onClick={bootstrap}
+            disabled={busy}
             style={{
-              padding: "10px 16px",
-              fontSize: 16,
-              cursor: busy ? "not-allowed" : "pointer",
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #e5e7eb",
+              background: "#fff",
+              cursor: "pointer",
             }}
           >
-            {busy ? "Logging…" : "Log (POST)"}
+            Refresh Auth
           </button>
-
           <button
-            onClick={fallbackGet}
-            disabled={busy || !text.trim()}
+            onClick={doLog}
+            disabled={!ready || busy || !msg.trim()}
             style={{
-              padding: "10px 16px",
-              fontSize: 16,
-              cursor: busy ? "not-allowed" : "pointer",
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #0ea5e9",
+              background: "#0ea5e9",
+              color: "#fff",
+              cursor: ready && msg.trim() && !busy ? "pointer" : "not-allowed",
             }}
-            type="button"
-            title="Use GET ?text=... in case POST is blocked"
           >
-            Log (GET fallback)
+            {busy ? "Logging…" : "Log to OneNote"}
           </button>
         </div>
-      </form>
+      </div>
 
-      {msg && <pre style={{ marginTop: 16, whiteSpace: "pre-wrap" }}>{msg}</pre>}
+      <div style={{ fontSize: 14, color: "#222", minHeight: 24 }}>{status}</div>
 
-      <hr style={{ margin: "24px 0" }} />
-      <p>
-        Tip: if you see “not authenticated”, open{" "}
-        <a href="/debug/diagnostics" target="_blank" rel="noreferrer">
-          /debug/diagnostics
-        </a>
-        , click <strong>Hard Reset + Login</strong>, then come back here.
-      </p>
+      {lastId && (
+        <div style={{ marginTop: 10, fontSize: 14 }}>
+          <div>Latest page: <strong>{lastTitle}</strong></div>
+          <div style={{ marginTop: 6 }}>
+            <a
+              href={`${base}/api/onenote/page-text?id=${encodeURIComponent(lastId)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View plain text
+            </a>
+            {" · "}
+            <a
+              href={`${base}/api/onenote/page-content?id=${encodeURIComponent(lastId)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View raw HTML
+            </a>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
