@@ -1,8 +1,13 @@
 // pages/api/onenote/quick-log.js
 //
-// Session-based quick logger that works for both POST (JSON) and GET (?text=..).
-// It DOES NOT read tokens from KV. It uses your existing session helpers,
-// same as /api/onenote/append-last which you proved works.
+// Session-based quick logger that supports:
+// - POST JSON:  { "text": "hello" }
+// - GET:        ?text=hello
+//
+// It never reads tokens from KV. It uses the signed session,
+// and if it detects a malformed access token (no '.'), it will
+// call /api/auth/refresh on the server (forwarding cookies) and
+// retry once.
 
 import { requireAuth, getAccessToken } from "@/lib/auth";
 import { get as kvGet, set as kvSet } from "@/lib/kv";
@@ -47,13 +52,14 @@ async function createDailyPage(accessToken, sectionId, initialHtml) {
 
   const j = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(JSON.stringify({ status: res.status, body: j, stage: "createDailyPage" }));
+    throw new Error(
+      JSON.stringify({ status: res.status, body: j, stage: "createDailyPage" })
+    );
   }
-  return j; // includes id, links, etc.
+  return j; // includes id
 }
 
 async function appendToPage(accessToken, pageId, htmlFragment) {
-  // Correct multipart/related PATCH with "commands" part
   const boundary = "batch_" + Date.now();
   const commands = [
     { target: "body", action: "append", position: "after", content: htmlFragment },
@@ -67,7 +73,9 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
     `\r\n--${boundary}--`;
 
   const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`,
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+      pageId
+    )}/content`,
     {
       method: "PATCH",
       headers: {
@@ -80,12 +88,39 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(JSON.stringify({ status: res.status, body: text || "(no body)", stage: "appendToPage" }));
+    throw new Error(
+      JSON.stringify({
+        status: res.status,
+        body: text || "(no body)",
+        stage: "appendToPage",
+      })
+    );
   }
 }
 
+function looksOpaqueOrBad(token) {
+  // Graph access tokens are JWTs (contain two dots). If not, try to refresh.
+  return !token || typeof token !== "string" || token.split(".").length < 3;
+}
+
+async function refreshServerSide(req) {
+  // Call our own refresh endpoint, forwarding incoming cookies.
+  const base =
+    process.env.APP_BASE_URL ||
+    process.env.NEXT_PUBLIC_APP_BASE_URL ||
+    `https://${req.headers.host}`;
+  const res = await fetch(`${base}/api/auth/refresh`, {
+    method: "POST",
+    headers: {
+      Cookie: req.headers.cookie || "",
+    },
+  });
+  // ignore body; if it failed, the next getAccessToken() will still fail
+  return res.ok;
+}
+
 export default requireAuth(async function handler(req, res, session) {
-  // Allow POST JSON or GET ?text=...
+  // Accept POST JSON or GET ?text=...
   let text;
   if (req.method === "POST") {
     text = req.body?.text;
@@ -104,19 +139,36 @@ export default requireAuth(async function handler(req, res, session) {
     return res.status(400).json({ ok: false, error: "Missing text" });
   }
 
-  try {
-    // Get a fresh access token from session (this path is already working for you)
-    const accessToken = await getAccessToken(session);
+  const sectionId =
+    process.env.ONE_NOTE_INBOX_SECTION_ID ||
+    ONE_NOTE_INBOX_SECTION_ID ||
+    "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // fallback
 
-    const sectionId =
-      process.env.ONE_NOTE_INBOX_SECTION_ID ||
-      ONE_NOTE_INBOX_SECTION_ID ||
-      "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // fallback
+  const title = todayTitle();
+  const kvKey = `daily:page:${title}`;
 
-    const title = todayTitle();
-    const kvKey = `daily:page:${title}`;
+  async function doWorkOnce() {
+    // get a token from the session
+    let accessToken = await getAccessToken(session);
 
-    // reuse today's page id from KV cache
+    // if it looks wrong/opaque, try a server-side refresh and re-read
+    if (looksOpaqueOrBad(accessToken)) {
+      await refreshServerSide(req);
+      accessToken = await getAccessToken(session);
+    }
+
+    if (looksOpaqueOrBad(accessToken)) {
+      // still bad after refresh
+      const kvProbe = {}; // helpful for your diagnostics
+      return res.status(401).json({
+        ok: false,
+        error: "InvalidAuthenticationToken",
+        message: "access token malformed (no JWT) after server refresh",
+        kv: kvProbe,
+      });
+    }
+
+    // reuse/create today's page
     let pageId = await kvGet(kvKey);
     if (!pageId) {
       const created = await createDailyPage(
@@ -129,11 +181,30 @@ export default requireAuth(async function handler(req, res, session) {
       await kvSet(kvKey, pageId);
     }
 
+    // append the new line
     const safe = htmlEscape(String(text));
     await appendToPage(accessToken, pageId, `<p>${safe}</p>`);
-
     return res.status(200).json({ ok: true, pageId, title });
+  }
+
+  try {
+    await doWorkOnce();
   } catch (err) {
+    // Graph 401s sometimes come from an expired token; refresh once and retry.
+    let retried = false;
+    try {
+      const parsed =
+        typeof err?.message === "string" ? JSON.parse(err.message) : null;
+      if (parsed?.status === 401 && !retried) {
+        retried = true;
+        await refreshServerSide(req);
+        await doWorkOnce();
+        return; // success after retry
+      }
+    } catch {
+      // ignore parse errors and fall through
+    }
+
     return res.status(400).json({
       ok: false,
       error: "Append failed",
