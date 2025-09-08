@@ -1,83 +1,151 @@
-// pages/api/onenote/page-text-latest.js
-import { get as kvGet } from "@/lib/kv";
+// pages/api/onenote/quick-log.js
+import { requireAuth, getAccessToken } from "@/lib/auth";
+import { get as kvGet, set as kvSet } from "@/lib/kv";
+import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 
-function htmlToText(html = "") {
-  html = html.replace(/<script[\s\S]*?<\/script>/gi, "")
-             .replace(/<style[\s\S]*?<\/style>/gi, "");
-  html = html
-    .replace(/<(br|br\/)\s*>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<\/h[1-6]>/gi, "\n")
-    .replace(/<\/li>/gi, "\n");
-  let text = html.replace(/<\/?[^>]+>/g, "");
-  text = text
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"');
-  text = text.replace(/\r/g, "").split("\n").map(l => l.trimEnd()).join("\n");
-  text = text.replace(/\n{3,}/g, "\n\n").trim();
-  const lines = text.split("\n").map(s => s.trim()).filter(Boolean);
-  if (lines.length >= 2 && lines[0] === lines[1]) lines.splice(1, 1);
-  return lines.join("\n");
+function htmlEscape(s = "") {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "GET") {
+function todayTitle() {
+  const d = new Date();
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `Daily Log — ${yyyy}-${mm}-${dd}`;
+}
+
+async function createDailyPage(accessToken, sectionId, initialHtml) {
+  const html =
+    initialHtml ||
+    `<html><head><title>${todayTitle()}</title></head><body>
+      <h1>${todayTitle()}</h1>
+      <hr/>
+    </body></html>`;
+
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(
+      sectionId
+    )}/pages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "text/html",
+      },
+      body: html,
+    }
+  );
+
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(JSON.stringify({ status: res.status, body: j }));
+  }
+  return j; // includes id, links, etc.
+}
+
+async function appendToPage(accessToken, pageId, htmlFragment) {
+  const boundary = "batch_" + Date.now();
+  const commands = [
+    { target: "body", action: "append", position: "after", content: htmlFragment },
+  ];
+
+  const body =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json\r\n` +
+    `Content-Disposition: form-data; name="commands"\r\n\r\n` +
+    JSON.stringify(commands) +
+    `\r\n--${boundary}--`;
+
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
+      pageId
+    )}/content`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      JSON.stringify({
+        status: res.status,
+        body: text || "(no body)",
+        stage: "appendToPage",
+      })
+    );
+  }
+}
+
+export default requireAuth(async function handler(req, res, session) {
+  // Handle preflight and accidental GETs
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST,GET,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(204).end();
+  }
+
+  // Accept both POST (JSON body) and GET (?text=...)
+  let text;
+  if (req.method === "POST") {
+    text = req.body?.text;
+  } else if (req.method === "GET") {
+    text = req.query?.text;
+  } else {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
-    const stored = await kvGet("msauth:default");
-    const accessToken = stored?.access;
-    if (!accessToken) {
-      return res.status(401).json({ ok: false, error: "Not authenticated" });
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ ok: false, error: "Missing text" });
     }
 
-    // Get most recent page id
-    const listUrl =
-      "https://graph.microsoft.com/v1.0/me/onenote/pages?$top=1&orderby=lastModifiedDateTime%20desc&select=id,title,lastModifiedDateTime";
-    const listRes = await fetch(listUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!listRes.ok) {
-      const body = await listRes.text();
-      return res.status(listRes.status).json({ ok: false, error: body || "Graph list error" });
-    }
-    const j = await listRes.json();
-    const item = j?.value?.[0];
-    if (!item?.id) {
-      return res.status(404).json({ ok: false, error: "No pages found" });
+    const accessToken = await getAccessToken(session);
+
+    const sectionId =
+      process.env.ONE_NOTE_INBOX_SECTION_ID ||
+      ONE_NOTE_INBOX_SECTION_ID ||
+      "0-824A10198D31C608!scfd7de0686df4aa1bc663dd4e7769585"; // fallback
+
+    const title = todayTitle();
+    const kvKey = `daily:page:${title}`;
+
+    // Reuse today's page if we already created it
+    let pageId = await kvGet(kvKey);
+    if (!pageId) {
+      const created = await createDailyPage(
+        accessToken,
+        sectionId,
+        `<html><head><title>${title}</title></head><body><h1>${title}</h1><hr/></body></html>`
+      );
+      pageId = created?.id;
+      if (!pageId) throw new Error("Create page returned no id");
+      await kvSet(kvKey, pageId);
     }
 
-    const id = item.id;
+    // Append the entry
+    const safe = htmlEscape(String(text));
+    const fragment = `<p>${safe}</p>`;
+    await appendToPage(accessToken, pageId, fragment);
 
-    // Fetch its HTML
-    const contentUrl = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(
-      id
-    )}/content`;
-    const r = await fetch(contentUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!r.ok) {
-      const body = await r.text();
-      return res.status(r.status).json({ ok: false, error: body || "Graph content error" });
-    }
-    const html = await r.text();
-    const text = htmlToText(html);
-
-    return res.status(200).json({
-      ok: true,
-      id,
-      title: item.title,
-      lastModifiedDateTime: item.lastModifiedDateTime,
-      length: text.length,
-      text,
-    });
+    return res.status(200).json({ ok: true, pageId, title });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    let detail;
+    try {
+      detail = JSON.parse(err?.message || "{}");
+    } catch {
+      detail = String(err);
+    }
+    return res.status(400).json({ ok: false, error: "Append failed", detail });
   }
-}
+});
