@@ -1,8 +1,8 @@
 // pages/api/onenote/quick-log.js
 //
-// Quick logger that works with either GET ?text=... or POST JSON {text}
-// It forces a refresh, then reads tokens directly from KV (msauth:default)
-// to avoid stale/opaque session values. Retries once if Graph returns 401.
+// Quick logger that accepts GET ?text=... or POST {text}.
+// Forces a refresh, then pulls the access token from KV (msauth:default),
+// and uses it as-is (opaque or JWT). Retries once if Graph returns 401.
 
 import { requireAuth } from "@/lib/auth";
 import { get as kvGet, set as kvSet } from "@/lib/kv";
@@ -18,10 +18,6 @@ function todayTitle() {
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(d.getUTCDate()).padStart(2, "0");
   return `Daily Log — ${yyyy}-${mm}-${dd}`;
-}
-
-function looksJWT(t) {
-  return !!t && typeof t === "string" && t.split(".").length >= 3;
 }
 
 async function refreshServerSide(req) {
@@ -40,16 +36,12 @@ async function getAccessFromKV() {
   return pack?.access || null;
 }
 
-async function ensureGoodAccessToken(req) {
-  // 1) Try KV
+async function ensureAccessToken(req) {
   let access = await getAccessFromKV();
-
-  // 2) If not a JWT, force refresh, then re-read
-  if (!looksJWT(access)) {
+  if (!access) {
     await refreshServerSide(req);
     access = await getAccessFromKV();
   }
-
   return access;
 }
 
@@ -73,7 +65,6 @@ async function createDailyPage(accessToken, sectionId, initialHtml) {
       body: html,
     }
   );
-
   const j = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(JSON.stringify({ status: res.status, body: j, stage: "createDailyPage" }));
@@ -110,21 +101,24 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
   }
 }
 
-export default requireAuth(async function handler(req, res /* session unused here intentionally */) {
+export default requireAuth(async function handler(req, res) {
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST,GET,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(204).end();
+  }
+
+  // Accept GET ?text=... or POST {text}
   let text;
   if (req.method === "POST") {
     text = req.body?.text;
   } else if (req.method === "GET") {
     text = req.query?.text;
-  } else if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST,GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    return res.status(204).end();
   } else {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
-
   if (!text || !String(text).trim()) {
     return res.status(400).json({ ok: false, error: "Missing text" });
   }
@@ -138,18 +132,12 @@ export default requireAuth(async function handler(req, res /* session unused her
   const kvKey = `daily:page:${title}`;
 
   async function doOnce() {
-    const accessToken = await ensureGoodAccessToken(req);
-    if (!looksJWT(accessToken)) {
-      const pack = await kvGet("msauth:default").catch(() => null);
+    const accessToken = await ensureAccessToken(req);
+    if (!accessToken) {
       return res.status(401).json({
         ok: false,
         error: "InvalidAuthenticationToken",
-        message: "access token malformed (no JWT) after refresh",
-        kv: {
-          access: pack?.access ? `[len:${pack.access.length}]` : null,
-          refresh: pack?.refresh ? `[len:${pack.refresh.length}]` : null,
-          id: pack?.id ? `[len:${pack.id.length}]` : null,
-        },
+        message: "no access token in KV after refresh",
       });
     }
 
