@@ -1,81 +1,99 @@
-import { requireAuth, getAccessToken } from "@/lib/auth";
+// pages/api/onenote/page-text.js
+import { get as kvGet } from "@/lib/kv";
 
-function htmlToText(html) {
-  // very small, dependency-free HTML → text
+/**
+ * Get a bearer token to call Graph:
+ * 1) Prefer KV stash set by /api/auth/refresh: key=msauth:default
+ * 2) Fall back to cookies (rarely needed if you're using cookies.txt + refresh)
+ */
+async function getBearerFromKVorCookies(req) {
+  // Try KV first
   try {
-    // remove scripts/styles
-    html = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
-    html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
-
-    // convert breaks/headings to newlines (keeps some structure)
-    html = html
-      .replace(/<(h[1-6]|p|div|li|br|tr|table|section|article|hr)\b[^>]*>/gi, "\n$&");
-
-    // strip tags
-    let text = html.replace(/<[^>]+>/g, " ");
-
-    // decode a few entities quickly
-    text = text
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&#39;|&apos;/g, "'")
-      .replace(/&quot;/g, '"');
-
-    // collapse whitespace
-    text = text.replace(/\s+\n/g, "\n").replace(/\n\s+/g, "\n");
-    text = text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-
-    return text;
-  } catch {
-    return "";
+    const kv = await kvGet("msauth:default");
+    if (kv && kv.access && typeof kv.access === "string") {
+      return kv.access;
+    }
+  } catch (_) {
+    // ignore
   }
+
+  // Very light fallback: look for access_token cookie (if your stack ever sets it)
+  const cookie = req.headers?.cookie || "";
+  const match = cookie.match(/access_token=([^;]+)/);
+  if (match) {
+    // URL-decoding in case it was encoded
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return match[1];
+    }
+  }
+
+  return null;
 }
 
-export default requireAuth(async function handler(req, res, session) {
+function stripHtmlToText(html = "") {
+  // Remove script/style
+  html = html.replace(/<script[\s\S]*?<\/script>/gi, "")
+             .replace(/<style[\s\S]*?<\/style>/gi, "");
+  // Replace <br> and block tags with newlines for readability
+  html = html.replace(/<(?:br|BR)\s*\/?>/g, "\n");
+  html = html.replace(/<\/(p|div|h[1-6]|li|ul|ol|table|tr|th|td)>/gi, "\n");
+  // Strip the rest of tags
+  html = html.replace(/<[^>]+>/g, "");
+  // Collapse multiple newlines/spaces
+  html = html.replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  return html;
+}
+
+export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   const { id } = req.query || {};
-  if (!id) {
-    return res.status(400).json({ ok: false, error: "Missing ?id=" });
+  if (!id || typeof id !== "string") {
+    return res.status(400).json({ ok: false, error: "Missing ?id" });
   }
 
   try {
-    const accessToken = await getAccessToken(session);
+    const accessToken = await getBearerFromKVorCookies(req);
     if (!accessToken) {
-      return res.status(401).json({ ok: false, error: "Not authenticated" });
+      return res.status(401).json({ ok: false, error: "Not authenticated (no access token in KV or cookies)" });
     }
 
-    // Always URL-encode the OneNote page id (the id contains '!' characters)
-    const encId = encodeURIComponent(String(id));
+    // 1) Get HTML content from Graph (users/{userPrincipalName}/onenote/pages/{id}/content)
+    // We target your MSA user principal you’ve been using everywhere.
+    const base = "https://graph.microsoft.com/v1.0/users/tchaudhry907@gmail.com/onenote/pages";
+    const url = `${base}/${encodeURIComponent(id)}/content`;
 
-    // Ask Graph for the HTML content; includeIDs=true usually keeps element ids
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${encId}/content?includeIDs=true`;
     const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "text/html",
+      },
     });
 
-    const ct = resp.headers.get("content-type") || "";
     const body = await resp.text();
-
     if (!resp.ok) {
-      // Bubble up Graph’s error body to help debugging
-      return res
-        .status(resp.status)
-        .json({ ok: false, error: body || `Graph error ${resp.status}` });
+      // Graph sometimes returns HTML error pages (ASP.NET yellow screen) — surface them as JSON
+      return res.status(resp.status).json({
+        ok: false,
+        error: body,
+      });
     }
 
-    // If Graph returned HTML, strip it; otherwise just return raw
-    const isHtml = ct.includes("text/html") || body.trim().startsWith("<");
-    const text = isHtml ? htmlToText(body) : body;
+    // 2) Convert HTML -> plain text
+    const text = stripHtmlToText(body);
 
-    return res.status(200).json({ ok: true, id, contentType: ct, text });
+    return res.status(200).json({
+      ok: true,
+      id,
+      length: text.length,
+      text,
+    });
   } catch (err) {
-    const msg =
-      typeof err?.message === "string" ? err.message : String(err || "Unknown error");
+    const msg = typeof err?.message === "string" ? err.message : String(err);
     return res.status(500).json({ ok: false, error: msg });
   }
-});
+}
