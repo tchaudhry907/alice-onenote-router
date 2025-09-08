@@ -1,0 +1,19 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Alice OneNote Logger",
+  "name_for_model": "alice_onenote_logger",
+  "description_for_human": "Log meals, workouts, and notes to your OneNote daily page and read them back.",
+  "description_for_model": "Append natural-language entries to the user’s Daily Log in OneNote and fetch today’s log text.",
+  "auth": {
+    "type": "service_http",
+    "authorization_type": "bearer"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://alice-onenote-router.vercel.app/openapi.yaml",
+    "is_user_authenticated": true
+  },
+  "logo_url": "https://alice-onenote-router.vercel.app/icon.png",
+  "contact_email": "support@example.com",
+  "legal_info_url": "https://alice-onenote-router.vercel.app/legal"
+}
