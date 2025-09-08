@@ -1,112 +1,56 @@
 // pages/api/chat/today.js
-//
-// Relay endpoint: GET
-// - Refreshes tokens on the server
-// - Reads today's latest Daily Log plain text via your existing routes
-// - Returns { ok, id, title, text }
-
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'GET') {
+    return res.status(405).json({ ok: false, error: 'Method not allowed' });
   }
 
   try {
-    const base = resolveBaseUrl(req);
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const origin = `${proto}://${host}`;
 
-    // 1) Ensure server has fresh tokens (uses KV on the server)
-    const refreshRes = await fetch(`${base}/api/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    // 1) Get latest (your working route)
+    const latestRes = await fetch(`${origin}/api/onenote/page-latest`, {
+      headers: { ...(req.headers.cookie ? { cookie: req.headers.cookie } : {}) },
     });
-
-    if (!refreshRes.ok) {
-      const body = await safeJson(refreshRes);
-      return res.status(500).json({
-        ok: false,
-        step: "refresh",
-        error: "Failed to refresh tokens",
-        detail: body,
-      });
+    const latest = await latestRes.json().catch(() => ({}));
+    if (!latestRes.ok || latest?.ok === false) {
+      return res
+        .status(latestRes.status || 500)
+        .json({ ok: false, error: 'Failed to fetch latest page', detail: latest });
     }
 
-    // 2) Get latest page id + title
-    const latestRes = await fetch(`${base}/api/onenote/page-latest`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-    });
-    const latest = await safeJson(latestRes);
-
-    if (!latestRes.ok || !latest?.ok || !latest?.id) {
-      return res.status(500).json({
-        ok: false,
-        step: "page-latest",
-        error: "Failed to get latest page",
-        detail: latest || null,
-      });
+    // shape can be { ok:true, id, title } or just {id,title}; normalize
+    const pageId = latest.id || latest?.page?.id || latest?.created?.id;
+    const title = latest.title || latest?.page?.title || latest?.created?.title;
+    if (!pageId) {
+      return res.status(404).json({ ok: false, error: 'No page found for today' });
     }
 
-    // 3) Get plain text for that page
+    // 2) Get plain text
     const textRes = await fetch(
-      `${base}/api/onenote/page-text?` +
-        new URLSearchParams({ id: latest.id }).toString(),
-      { method: "GET", headers: { "Content-Type": "application/json" } }
+      `${origin}/api/onenote/page-text?` + new URLSearchParams({ id: pageId }),
+      { headers: { ...(req.headers.cookie ? { cookie: req.headers.cookie } : {}) } }
     );
-
-    const textJson = await safeJson(textRes);
-    if (!textRes.ok || !textJson?.ok) {
-      return res.status(500).json({
-        ok: false,
-        step: "page-text",
-        error: "Failed to fetch page text",
-        detail: textJson || null,
-      });
+    const textJson = await textRes.json().catch(() => ({}));
+    if (!textRes.ok || textJson?.ok === false) {
+      return res
+        .status(textRes.status || 500)
+        .json({ ok: false, error: 'Failed to fetch page text', detail: textJson });
     }
 
     return res.status(200).json({
       ok: true,
-      id: latest.id,
-      title: latest.title || null,
-      text: textJson.text || "",
+      id: pageId,
+      title: title || 'Today',
+      text: textJson.text || '',
+      length: textJson.length ?? (textJson.text ? textJson.text.length : 0),
     });
   } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      error: "Unhandled error",
-      detail: String(err?.message || err),
-    });
-  }
-}
-
-function resolveBaseUrl(req) {
-  const fromEnv =
-    process.env.APP_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_BASE_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null);
-
-  if (fromEnv) return fromEnv;
-
-  const host =
-    req?.headers?.["x-forwarded-host"] ||
-    req?.headers?.host ||
-    "localhost:3000";
-
-  const proto =
-    req?.headers?.["x-forwarded-proto"] ||
-    (host.includes("localhost") ? "http" : "https");
-
-  return `${proto}://${host}`;
-}
-
-async function safeJson(res) {
-  try {
-    return await res.json();
-  } catch {
-    try {
-      const t = await res.text();
-      return { text: t };
-    } catch {
-      return null;
-    }
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
