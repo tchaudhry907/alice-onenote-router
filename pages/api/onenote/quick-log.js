@@ -1,8 +1,6 @@
 // pages/api/onenote/quick-log.js
-//
-// Quick logger that accepts GET ?text=... or POST {text}.
-// Forces a refresh, then pulls the access token from KV (msauth:default),
-// and uses it as-is (opaque or JWT). Retries once if Graph returns 401.
+// Accepts GET ?text=... or POST {text}. Creates/reuses today's page and appends a line.
+// Uses whatever access token is in KV (opaque or JWT). Retries once on 401.
 
 import { requireAuth } from "@/lib/auth";
 import { get as kvGet, set as kvSet } from "@/lib/kv";
@@ -11,7 +9,6 @@ import { ONE_NOTE_INBOX_SECTION_ID } from "@/lib/constants";
 function htmlEscape(s = "") {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-
 function todayTitle() {
   const d = new Date();
   const yyyy = d.getUTCFullYear();
@@ -30,12 +27,10 @@ async function refreshServerSide(req) {
     headers: { Cookie: req.headers.cookie || "" },
   }).catch(() => {});
 }
-
 async function getAccessFromKV() {
   const pack = await kvGet("msauth:default");
   return pack?.access || null;
 }
-
 async function ensureAccessToken(req) {
   let access = await getAccessFromKV();
   if (!access) {
@@ -69,19 +64,14 @@ async function createDailyPage(accessToken, sectionId, initialHtml) {
   if (!res.ok) {
     throw new Error(JSON.stringify({ status: res.status, body: j, stage: "createDailyPage" }));
   }
-  return j; // includes id
+  return j; // has id
 }
 
 async function appendToPage(accessToken, pageId, htmlFragment) {
-  const boundary = "batch_" + Date.now();
+  // IMPORTANT: OneNote expects application/json with an ARRAY of commands
   const commands = [
     { target: "body", action: "append", position: "after", content: htmlFragment },
   ];
-
-  const body =
-    `--${boundary}\r\nContent-Type: application/json\r\n` +
-    `Content-Disposition: form-data; name="commands"\r\n\r\n` +
-    JSON.stringify(commands) + `\r\n--${boundary}--`;
 
   const res = await fetch(
     `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pageId)}/content`,
@@ -89,15 +79,19 @@ async function appendToPage(accessToken, pageId, htmlFragment) {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        "Content-Type": `multipart/related; boundary=${boundary}`,
+        "Content-Type": "application/json",
       },
-      body,
+      body: JSON.stringify(commands),
     }
   );
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(JSON.stringify({ status: res.status, body: text || "(no body)", stage: "appendToPage" }));
+    throw new Error(JSON.stringify({
+      status: res.status,
+      body: text || "(no body)",
+      stage: "appendToPage"
+    }));
   }
 }
 
@@ -112,13 +106,10 @@ export default requireAuth(async function handler(req, res) {
 
   // Accept GET ?text=... or POST {text}
   let text;
-  if (req.method === "POST") {
-    text = req.body?.text;
-  } else if (req.method === "GET") {
-    text = req.query?.text;
-  } else {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+  if (req.method === "POST") text = req.body?.text;
+  else if (req.method === "GET") text = req.query?.text;
+  else return res.status(405).json({ ok: false, error: "Method not allowed" });
+
   if (!text || !String(text).trim()) {
     return res.status(400).json({ ok: false, error: "Missing text" });
   }
@@ -163,7 +154,7 @@ export default requireAuth(async function handler(req, res) {
   try {
     await doOnce();
   } catch (err) {
-    // If Graph said 401, try one forced refresh + retry
+    // If 401 from Graph, force refresh + retry once
     try {
       const parsed = typeof err?.message === "string" ? JSON.parse(err.message) : null;
       if (parsed?.status === 401) {
