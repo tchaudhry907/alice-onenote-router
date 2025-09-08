@@ -1,105 +1,59 @@
 // pages/api/chat/log.js
-//
-// Relay endpoint: POST { text: "..." }
-// - Refreshes tokens on the server
-// - Calls your existing /api/onenote/quick-log to write to the Daily Log
-// - Returns { ok, pageId, title } on success
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  // Minimal CORS (helps if you ever call this from a web UI)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return res.status(405).json({ ok: false, error: 'Method not allowed' });
   }
 
   try {
-    const { text } = (req.body || {});
-    if (!text || typeof text !== "string" || !text.trim()) {
-      return res.status(400).json({ ok: false, error: "Missing text" });
+    // Accept text from:
+    // - POST JSON: { "text": "..." }
+    // - GET query: /api/chat/log?text=...
+    let text;
+    if (req.method === 'POST') {
+      // next.js already parsed body for JSON; fall back if raw
+      if (typeof req.body === 'string') {
+        try { text = JSON.parse(req.body).text; } catch { /* ignore */ }
+      } else if (req.body && typeof req.body === 'object') {
+        text = req.body.text;
+      }
+    } else {
+      text = req.query.text;
     }
 
-    const base = resolveBaseUrl(req);
-
-    // 1) Ensure server has fresh tokens (uses KV on the server)
-    const refreshRes = await fetch(`${base}/api/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-
-    if (!refreshRes.ok) {
-      const body = await safeJson(refreshRes);
-      return res.status(500).json({
-        ok: false,
-        step: "refresh",
-        error: "Failed to refresh tokens",
-        detail: body,
-      });
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ ok: false, error: 'Missing text' });
     }
 
-    // 2) Append the line to today's Daily Log
-    const logRes = await fetch(`${base}/api/onenote/quick-log`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const origin = `${proto}://${host}`;
+
+    // Use your working quick-log route (which handles create/append + tokens)
+    const upstream = await fetch(`${origin}/api/onenote/quick-log`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // forward cookies so the server-side session is used
+        ...(req.headers.cookie ? { cookie: req.headers.cookie } : {}),
+      },
       body: JSON.stringify({ text }),
     });
 
-    const out = await safeJson(logRes);
-
-    if (!logRes.ok || !out?.ok) {
-      return res.status(500).json({
-        ok: false,
-        step: "quick-log",
-        error: "Append failed",
-        detail: out || null,
-      });
+    const data = await upstream.json().catch(() => ({}));
+    if (!upstream.ok || data?.ok === false) {
+      return res
+        .status(upstream.status || 500)
+        .json({ ok: false, error: 'Append failed', detail: data });
     }
 
-    // Success
-    // e.g. { ok:true, pageId:"...", title:"Daily Log — YYYY-MM-DD" }
-    // Normalize shape just in case
-    return res.status(200).json({
-      ok: true,
-      pageId: out.pageId || null,
-      title: out.title || null,
-    });
+    return res.status(200).json({ ok: true, ...data });
   } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      error: "Unhandled error",
-      detail: String(err?.message || err),
-    });
-  }
-}
-
-function resolveBaseUrl(req) {
-  // Prefer explicit env, then Vercel URL, then request host, then localhost (dev)
-  const fromEnv =
-    process.env.APP_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_BASE_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null);
-
-  if (fromEnv) return fromEnv;
-
-  const host =
-    req?.headers?.["x-forwarded-host"] ||
-    req?.headers?.host ||
-    "localhost:3000";
-
-  const proto =
-    req?.headers?.["x-forwarded-proto"] ||
-    (host.includes("localhost") ? "http" : "https");
-
-  return `${proto}://${host}`;
-}
-
-async function safeJson(res) {
-  try {
-    return await res.json();
-  } catch {
-    try {
-      const t = await res.text();
-      return { text: t };
-    } catch {
-      return null;
-    }
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
