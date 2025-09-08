@@ -58,6 +58,8 @@ paths:
                   text:
                     type: string
 components:
+  # Some UIs expect a schemas object, even if unused
+  schemas: {}
   securitySchemes:
     ServiceBearer:
       type: http
