@@ -1,32 +1,49 @@
 export default async function handler(req, res) {
-  // CORS
+  // CORS for ChatGPT Actions
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "GET") return res.status(405).json({ ok: false, error: "Method not allowed" });
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization");
 
-  // Bearer auth for ChatGPT Action
-  const expected = process.env.ACTION_BEARER_TOKEN || "";
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
+
+  // Bearer check
   const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!expected || token !== expected) {
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token || token !== process.env.ACTION_BEARER_TOKEN) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
-  const base = `https://${req.headers.host}`;
+  try {
+    const base = process.env.PUBLIC_BASE_URL || "https://alice-onenote-router.vercel.app";
 
-  const latest = await fetch(`${base}/api/onenote/page-latest`);
-  const jl = await latest.json().catch(() => ({}));
-  if (!latest.ok || !jl?.ok) {
-    return res.status(404).json({ ok: false, error: "No daily page" });
+    // Find latest page id (your existing API)
+    const latestResp = await fetch(`${base}/api/onenote/page-latest`);
+    const latest = await latestResp.json();
+
+    if (!latestResp.ok || latest.ok === false) {
+      return res.status(500).json({ ok: false, error: "Failed to get latest page", detail: latest });
+    }
+
+    // Get plain text
+    const textResp = await fetch(
+      `${base}/api/onenote/page-text?id=${encodeURIComponent(latest.id)}`
+    );
+    const textJson = await textResp.json();
+
+    if (!textResp.ok || textJson.ok === false) {
+      return res.status(500).json({ ok: false, error: "Failed to fetch page text", detail: textJson });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      id: latest.id,
+      title: latest.title,
+      text: textJson.text
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-
-  const textResp = await fetch(`${base}/api/onenote/page-text?id=${encodeURIComponent(jl.id)}`);
-  const jt = await textResp.json().catch(() => ({}));
-  if (!textResp.ok || !jt?.ok) {
-    return res.status(500).json({ ok: false, error: "Failed to read page", detail: jt });
-  }
-
-  return res.status(200).json({ ok: true, id: jl.id, title: jl.title, text: jt.text });
 }
