@@ -1,14 +1,14 @@
 openapi: 3.0.1
 info:
   title: Alice OneNote Logger
-  version: "1.0"
+  version: "1.0.0"
 servers:
   - url: https://alice-onenote-router.vercel.app
 paths:
   /api/chat/log:
     post:
       operationId: logNote
-      summary: Append a natural-language entry to the user's OneNote daily page.
+      summary: Append a natural-language entry to the user’s OneNote daily page.
       security:
         - ServiceBearer: []
       requestBody:
@@ -17,50 +17,50 @@ paths:
           application/json:
             schema:
               type: object
-              required: [text]
+              required:
+                - text
               properties:
                 text:
                   type: string
-                  description: Entry text to append (e.g., "Breakfast: oatmeal 300 cals. #breakfast").
       responses:
         "200":
-          description: OK
+          description: Success
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  ok: { type: boolean }
-                  pageId: { type: string, nullable: true }
-                  title: { type: string, nullable: true }
-        "4XX":
-          description: Error
-        "5XX":
-          description: Error
+                  ok:
+                    type: boolean
+                  pageId:
+                    type: string
+                  title:
+                    type: string
   /api/chat/today:
     get:
-      operationId: readToday
-      summary: Read today's OneNote daily page as plain text.
+      operationId: getToday
+      summary: Get today’s OneNote daily log text.
       security:
         - ServiceBearer: []
       responses:
         "200":
-          description: OK
+          description: Success
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  ok: { type: boolean }
-                  id: { type: string }
-                  title: { type: string }
-                  text: { type: string }
-        "4XX":
-          description: Error
-        "5XX":
-          description: Error
+                  ok:
+                    type: boolean
+                  id:
+                    type: string
+                  title:
+                    type: string
+                  text:
+                    type: string
 components:
   securitySchemes:
     ServiceBearer:
       type: http
       scheme: bearer
+      bearerFormat: JWT
