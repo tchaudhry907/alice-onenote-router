@@ -1,50 +1,72 @@
+// pages/api/chat/log.js
 export default async function handler(req, res) {
-  // CORS for ChatGPT Actions
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
-  if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  // Bearer check
-  const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token || token !== process.env.ACTION_BEARER_TOKEN) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  // --- Bearer token check (service auth from your GPT) ---
+  const authz = req.headers.authorization || "";
+  const token = process.env.ACTION_BEARER_TOKEN;
+  if (!token || !authz.toLowerCase().startsWith("bearer ")) {
+    return res.status(401).json({ ok: false, error: "Unauthorized (missing bearer)" });
+  }
+  const presented = authz.slice("bearer ".length);
+  if (presented !== token) {
+    return res.status(401).json({ ok: false, error: "Unauthorized (bad bearer)" });
   }
 
+  let body;
   try {
-    const { text } = req.body || {};
-    if (!text || typeof text !== "string") {
-      return res.status(400).json({ ok: false, error: "Missing text" });
-    }
+    body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+  } catch {
+    return res.status(400).json({ ok: false, error: "Bad JSON body" });
+  }
+  const text = (body && body.text ? String(body.text) : "").trim();
+  if (!text) return res.status(400).json({ ok: false, error: "Missing text" });
 
-    // Re-use your working quick-log endpoint server-to-server
-    const base = process.env.PUBLIC_BASE_URL || "https://alice-onenote-router.vercel.app";
-    const r = await fetch(`${base}/api/onenote/quick-log`, {
+  // Build same-origin base URL for internal calls
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const proto = (req.headers["x-forwarded-proto"] || "https");
+  const base = `${proto}://${host}`;
+
+  // Helper to POST JSON to our own routes
+  const postJSON = (path, json) =>
+    fetch(`${base}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      // NOTE: we’re server-side; cookies from the user’s browser aren’t needed here
+      body: JSON.stringify(json || {}),
     });
 
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok || data.ok === false) {
-      return res.status(500).json({
-        ok: false,
-        error: "Append failed",
-        detail: data || (await r.text())
-      });
-    }
+  // 1) First try the simple path: use the working quick-log route
+  let r = await postJSON("/api/onenote/quick-log", { text });
+  let j;
+  try { j = await r.json(); } catch (e) { j = { ok: false, error: "Non-JSON from quick-log" }; }
 
-    return res.status(200).json({
-      ok: true,
-      pageId: data.pageId,
-      title: data.title
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  // 2) If it failed due to a stale/missing page ID, create today’s page then retry once
+  const looksLikeMissingPage =
+    !j?.ok &&
+    (r.status === 404 ||
+     String(j?.error || "").toLowerCase().includes("resource id does not exist") ||
+     String(j?.detail?.body || "").toLowerCase().includes("resource id does not exist"));
+
+  if (looksLikeMissingPage) {
+    // create/reuse today's Daily Log page in Inbox/Quick Notes
+    await postJSON("/api/graph/page-create-to-inbox", {});
+    // retry
+    r = await postJSON("/api/onenote/quick-log", { text });
+    try { j = await r.json(); } catch (e) { j = { ok: false, error: "Non-JSON from quick-log (retry)" }; }
   }
+
+  if (j?.ok) {
+    return res.status(200).json(j);
+  }
+
+  // Surface useful debug
+  return res.status(r.status || 500).json({
+    ok: false,
+    error: j?.error || "Append failed",
+    detail: j?.detail || null,
+  });
 }
