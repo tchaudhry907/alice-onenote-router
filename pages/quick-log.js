@@ -16,11 +16,34 @@ export default function QuickLog() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      const j = await r.json();
+      const j = await r.json().catch(() => ({}));
       if (!r.ok || !j?.ok) {
         setMsg(`❌ ${j?.error || "Failed"} ${j?.detail ? JSON.stringify(j.detail) : ""}`);
       } else {
         setMsg(`✅ Logged to "${j.title}".`);
+        setText("");
+      }
+    } catch (e) {
+      setMsg(`❌ ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function fallbackGet(e) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg("");
+    try {
+      // Fallback path: GET ?text=...
+      const url = new URL("/api/onenote/quick-log", location.origin);
+      url.searchParams.set("text", text);
+      const r = await fetch(url.toString(), { method: "GET" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j?.ok) {
+        setMsg(`❌ (GET fallback) ${j?.error || "Failed"} ${j?.detail ? JSON.stringify(j.detail) : ""}`);
+      } else {
+        setMsg(`✅ (GET fallback) Logged to "${j.title}".`);
         setText("");
       }
     } catch (e) {
@@ -43,7 +66,7 @@ export default function QuickLog() {
           onChange={(e) => setText(e.target.value)}
           placeholder="Your entry…"
         />
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
           <button
             type="submit"
             disabled={busy || !text.trim()}
@@ -53,7 +76,21 @@ export default function QuickLog() {
               cursor: busy ? "not-allowed" : "pointer",
             }}
           >
-            {busy ? "Logging…" : "Log"}
+            {busy ? "Logging…" : "Log (POST)"}
+          </button>
+
+          <button
+            onClick={fallbackGet}
+            disabled={busy || !text.trim()}
+            style={{
+              padding: "10px 16px",
+              fontSize: 16,
+              cursor: busy ? "not-allowed" : "pointer",
+            }}
+            type="button"
+            title="Use GET ?text=... in case POST is blocked"
+          >
+            Log (GET fallback)
           </button>
         </div>
       </form>
@@ -62,9 +99,11 @@ export default function QuickLog() {
 
       <hr style={{ margin: "24px 0" }} />
       <p>
-        Tip: if you get a “not authenticated” message, open{" "}
-        <a href="/debug/diagnostics">/debug/diagnostics</a>, click{" "}
-        <strong>Hard Reset + Login</strong>, then come back here.
+        Tip: if you see “not authenticated”, open{" "}
+        <a href="/debug/diagnostics" target="_blank" rel="noreferrer">
+          /debug/diagnostics
+        </a>
+        , click <strong>Hard Reset + Login</strong>, then come back here.
       </p>
     </div>
   );
