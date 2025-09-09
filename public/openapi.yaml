@@ -1,71 +1,60 @@
 openapi: 3.1.0
 info:
   title: Alice OneNote Logger
-  version: "1.0.0"
-  description: >
-    Create a page in AliceChatGPT/Inbox, read back the text, and return OneNote links.
-
+  version: 1.0.0
+  description: Create a page in AliceChatGPT/Inbox, read back the text, and return OneNote links.
 servers:
   - url: https://alice-onenote-router.vercel.app
-
 paths:
   /api/graph/create-read-link:
     post:
       summary: Create a page in Inbox, read text, and return links
       operationId: createReadLink
       security:
-        - ServiceBearer: []
+        - ServiceBearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required:
-                - title
-                - html
               properties:
                 title:
                   type: string
-                  description: Page title (e.g., "[MEALS] Chicken + rice (~500 cal)")
                 html:
                   type: string
-                  description: Page body in HTML (simple <p> blocks)
+              required: [title, html]
       responses:
-        "200":
-          description: Successful response with created page data
+        '200':
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CreateReadLinkResponse'
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  created:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                  text:
+                    type: string
+                  links:
+                    type: object
+                    properties:
+                      oneNoteWebUrl:
+                        type: string
+                      oneNoteClientUrl:
+                        type: string
 
 components:
-  schemas:
-    CreateReadLinkResponse:
-      type: object
-      properties:
-        ok:
-          type: boolean
-        created:
-          type: object
-          properties:
-            id:
-              type: string
-        text:
-          type: string
-        links:
-          type: object
-          properties:
-            oneNoteWebUrl:
-              type: string
-            oneNoteClientUrl:
-              type: string
-
   securitySchemes:
-    ServiceBearer:
+    ServiceBearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
 
 security:
-  - ServiceBearer: []
+  - ServiceBearerAuth: []
