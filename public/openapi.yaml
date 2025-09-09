@@ -1,67 +1,153 @@
 openapi: 3.1.0
 info:
   title: Alice OneNote Logger
-  version: "1.0.0"
+  version: 1.0.0
+  description: >
+    Creates OneNote pages in the AliceChatGPT/Inbox and returns the page text and
+    openable links. Also supports quick one-line logging to today's Daily Log page.
+
 servers:
   - url: https://alice-onenote-router.vercel.app
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: token
+    apiKeyQuery:
+      type: apiKey
+      in: query
+      name: key
+
+  schemas:
+    CreateReadLinkRequest:
+      type: object
+      required: [title, html]
+      properties:
+        title:
+          type: string
+          description: Page title (e.g., "[MEALS] Chicken + rice (~500 cal)")
+        html:
+          type: string
+          description: Minimal HTML body (e.g., "<p>🍽️ Chicken + rice (~500 cal)</p>")
+        dryRun:
+          type: boolean
+          description: If true, validate only and do not create a page.
+
+    CreatedRef:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: OneNote page id
+
+    LinkPair:
+      type: object
+      properties:
+        oneNoteWebUrl:
+          type: string
+          format: uri
+        oneNoteClientUrl:
+          type: string
+          description: onenote: client URI
+
+    CreateReadLinkResponse:
+      type: object
+      required: [ok, created, text, links]
+      properties:
+        ok:
+          type: boolean
+        created:
+          $ref: '#/components/schemas/CreatedRef'
+        text:
+          type: string
+          description: First lines of the created page’s text
+        links:
+          $ref: '#/components/schemas/LinkPair'
+
+    QuickLogRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: Single short line to append to today's Daily Log page
+
+    QuickLogResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        pageId:
+          type: string
+          description: Target Daily Log page id (when available)
+
 paths:
-  /api/chat/log:
+  /api/graph/create-read-link:
     post:
-      operationId: logNote
-      summary: Append a natural-language entry to the user’s OneNote daily page.
+      operationId: createReadLink
+      summary: Create an Inbox page, then return its text and openable links.
+      description: >
+        Server performs: create page → read text → resolve links.
+        Notebook and section are hardcoded to AliceChatGPT/Inbox server-side.
       security:
-        - ServiceBearer: []
+        - bearerAuth: []
+        - apiKeyQuery: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [text]
-              properties:
-                text:
-                  type: string
+              $ref: '#/components/schemas/CreateReadLinkRequest'
+            examples:
+              meal:
+                value:
+                  title: "[MEALS] Chicken + rice (~500 cal)"
+                  html: "<p>🍽️ Chicken + rice (~500 cal)</p>"
       responses:
-        "200":
-          description: Success
+        '200':
+          description: Created and resolved successfully
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                  pageId:
-                    type: string
-                  title:
-                    type: string
-  /api/chat/today:
-    get:
-      operationId: getToday
-      summary: Get today’s OneNote daily log text.
+                $ref: '#/components/schemas/CreateReadLinkResponse'
+        '401':
+          description: Missing/invalid token
+        '4XX':
+          description: Client error
+        '5XX':
+          description: Server error
+
+  /api/onenote/quick-log:
+    post:
+      operationId: quickLog
+      summary: Append a single short line to today's Daily Log page.
       security:
-        - ServiceBearer: []
+        - bearerAuth: []
+        - apiKeyQuery: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuickLogRequest'
+            examples:
+              snack:
+                value:
+                  text: "Snack: greek yogurt (120 cal)"
       responses:
-        "200":
-          description: Success
+        '200':
+          description: Appended
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                  id:
-                    type: string
-                  title:
-                    type: string
-                  text:
-                    type: string
-components:
-  # Some UIs expect a schemas object, even if unused
-  schemas: {}
-  securitySchemes:
-    ServiceBearer:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+                $ref: '#/components/schemas/QuickLogResponse'
+        '401':
+          description: Missing/invalid token
+        '4XX':
+          description: Client error
+        '5XX':
+          description: Server error
