@@ -37,26 +37,30 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                  created:
-                    type: object
-                    properties:
-                      id:
-                        type: string
-                  text:
-                    type: string
-                  links:
-                    type: object
-                    properties:
-                      oneNoteWebUrl:
-                        type: string
-                      oneNoteClientUrl:
-                        type: string
+                $ref: '#/components/schemas/CreateReadLinkResponse'
 
 components:
+  schemas:
+    CreateReadLinkResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        created:
+          type: object
+          properties:
+            id:
+              type: string
+        text:
+          type: string
+        links:
+          type: object
+          properties:
+            oneNoteWebUrl:
+              type: string
+            oneNoteClientUrl:
+              type: string
+
   securitySchemes:
     ServiceBearer:
       type: http
