@@ -1,8 +1,9 @@
 // pages/api/graph/create-read-link.js
 
+import { getAccessToken } from '../../lib/auth'; // adjust path if your helper is elsewhere
+
 // ====== CONFIG ======
-const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN';      // already set in Vercel
-const GRAPH_TOKEN_ENV  = 'MS_GRAPH_ACCESS_TOKEN';    // TEMP for quick E2E test
+const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN'; // already set in Vercel
 
 // ====== CORS ======
 function cors(res) {
@@ -32,7 +33,6 @@ function assertBearer(req, res) {
 }
 
 function stripHtml(html) {
-  // quick & safe enough for "first lines" extract
   return String(html)
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -42,8 +42,8 @@ function stripHtml(html) {
 }
 
 async function graphFetch(path, { method = 'GET', headers = {}, body } = {}) {
-  const accessToken = process.env[GRAPH_TOKEN_ENV];
-  if (!accessToken) throw new Error(`Missing ${GRAPH_TOKEN_ENV} env var for Graph access`);
+  const accessToken = await getAccessToken(); // 🔑 use your helper
+  if (!accessToken) throw new Error('Could not obtain Graph access token');
   const url = `https://graph.microsoft.com/v1.0${path}`;
   const res = await fetch(url, {
     method,
@@ -60,7 +60,6 @@ async function graphFetch(path, { method = 'GET', headers = {}, body } = {}) {
     err.body = text;
     throw err;
   }
-  // Some OneNote calls (page creation) return 201 with JSON entity
   const contentType = res.headers.get('content-type') || '';
   if (contentType.includes('application/json')) return res.json();
   return res.text();
@@ -81,13 +80,11 @@ async function getSectionIdByName(notebookId, name) {
 }
 
 function buildMultipartForPageHtml(html, title) {
-  // Per OneNote API: multipart/form-data with "Presentation" part
   const boundary = '----AliceOneLoggerV3' + Math.random().toString(36).slice(2);
   const head =
     `--${boundary}\r\n` +
     `Content-Disposition: form-data; name="Presentation"\r\n` +
     `Content-Type: text/html\r\n\r\n`;
-  // If you want to embed title in the HTML head:
   const htmlDoc = `<!DOCTYPE html><html><head><title>${title}</title></head><body>${html}</body></html>`;
   const tail = `\r\n--${boundary}--`;
   const body = Buffer.from(head + htmlDoc + tail, 'utf8');
@@ -95,42 +92,38 @@ function buildMultipartForPageHtml(html, title) {
 }
 
 async function createOneNotePage({ notebookName, sectionName, title, html }) {
-  // 1) Resolve notebook + section
   const nbId = await getNotebookIdByName(notebookName);
   const secId = await getSectionIdByName(nbId, sectionName);
 
-  // 2) Create page
   const { body, boundary } = buildMultipartForPageHtml(html, title);
   const created = await graphFetch(
     `/me/onenote/sections/${encodeURIComponent(secId)}/pages`,
     {
       method: 'POST',
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`
-      },
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
       body
     }
   );
 
-  // "created" is the Page entity; capture id + links
   const pageId = created?.id;
   const links = created?.links || {};
-  if (!pageId || !links?.oneNoteWebUrl || !links?.oneNoteClientUrl) {
-    // fallback fetch (select links if not returned by creation response)
+  if (!pageId) throw new Error('Page creation failed, missing id');
+
+  if (!links.oneNoteWebUrl || !links.oneNoteClientUrl) {
     const p = await graphFetch(`/me/onenote/pages/${encodeURIComponent(pageId)}?$select=id,links`);
-    links.oneNoteWebUrl   = p?.links?.oneNoteWebUrl   || links.oneNoteWebUrl;
-    links.oneNoteClientUrl= p?.links?.oneNoteClientUrl|| links.oneNoteClientUrl;
+    links.oneNoteWebUrl = p?.links?.oneNoteWebUrl || links.oneNoteWebUrl;
+    links.oneNoteClientUrl = p?.links?.oneNoteClientUrl || links.oneNoteClientUrl;
   }
+
   return { pageId, links };
 }
 
 async function readPageFirstLines(pageId) {
-  // Pull HTML content and reduce to first lines
   const html = await graphFetch(`/me/onenote/pages/${encodeURIComponent(pageId)}/content?includeIDs=true`, {
     headers: { 'Accept': 'text/html' }
   });
   const text = stripHtml(html);
-  return text.slice(0, 600); // keep it succinct
+  return text.slice(0, 600);
 }
 
 // ====== HANDLER ======
@@ -140,7 +133,7 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
 
-  if (!assertBearer(req, res)) return; // Bearer check (router token)
+  if (!assertBearer(req, res)) return;
 
   try {
     const { title, html } = req.body || {};
@@ -148,9 +141,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'Invalid body: { title, html } are required strings' });
     }
 
-    // Create -> Read -> Return
     const NOTEBOOK = 'AliceChatGPT';
-    const SECTION  = 'Inbox';
+    const SECTION = 'Inbox';
 
     const { pageId, links } = await createOneNotePage({
       notebookName: NOTEBOOK,
