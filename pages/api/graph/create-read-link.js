@@ -1,45 +1,179 @@
 // pages/api/graph/create-read-link.js
 
+// ====== CONFIG ======
+const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN';      // already set in Vercel
+const GRAPH_TOKEN_ENV  = 'MS_GRAPH_ACCESS_TOKEN';    // TEMP for quick E2E test
+
+// ====== CORS ======
 function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*'); // tighten to your origin if you want
+  res.setHeader('Access-Control-Allow-Origin', '*'); // tighten to your origin if desired
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
+// ====== HELPERS ======
+function assertBearer(req, res) {
+  const expected = process.env[ACTION_TOKEN_ENV];
+  if (!expected) {
+    res.status(500).json({ ok: false, error: `Server misconfig: ${ACTION_TOKEN_ENV} not set` });
+    return null;
+  }
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) {
+    res.status(401).json({ ok: false, error: 'Missing Bearer token' });
+    return null;
+  }
+  const token = auth.slice('Bearer '.length).trim();
+  if (token !== expected) {
+    res.status(401).json({ ok: false, error: 'Invalid token' });
+    return null;
+  }
+  return true;
+}
+
+function stripHtml(html) {
+  // quick & safe enough for "first lines" extract
+  return String(html)
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function graphFetch(path, { method = 'GET', headers = {}, body } = {}) {
+  const accessToken = process.env[GRAPH_TOKEN_ENV];
+  if (!accessToken) throw new Error(`Missing ${GRAPH_TOKEN_ENV} env var for Graph access`);
+  const url = `https://graph.microsoft.com/v1.0${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      ...headers
+    },
+    body
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`Graph ${method} ${path} -> ${res.status}`);
+    err.status = res.status;
+    err.body = text;
+    throw err;
+  }
+  // Some OneNote calls (page creation) return 201 with JSON entity
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) return res.json();
+  return res.text();
+}
+
+async function getNotebookIdByName(name) {
+  const data = await graphFetch(`/me/onenote/notebooks?$select=id,displayName`);
+  const hit = (data.value || []).find(n => n.displayName === name);
+  if (!hit) throw new Error(`Notebook not found: ${name}`);
+  return hit.id;
+}
+
+async function getSectionIdByName(notebookId, name) {
+  const data = await graphFetch(`/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections?$select=id,displayName`);
+  const hit = (data.value || []).find(s => s.displayName === name);
+  if (!hit) throw new Error(`Section not found in notebook: ${name}`);
+  return hit.id;
+}
+
+function buildMultipartForPageHtml(html, title) {
+  // Per OneNote API: multipart/form-data with "Presentation" part
+  const boundary = '----AliceOneLoggerV3' + Math.random().toString(36).slice(2);
+  const head =
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="Presentation"\r\n` +
+    `Content-Type: text/html\r\n\r\n`;
+  // If you want to embed title in the HTML head:
+  const htmlDoc = `<!DOCTYPE html><html><head><title>${title}</title></head><body>${html}</body></html>`;
+  const tail = `\r\n--${boundary}--`;
+  const body = Buffer.from(head + htmlDoc + tail, 'utf8');
+  return { body, boundary };
+}
+
+async function createOneNotePage({ notebookName, sectionName, title, html }) {
+  // 1) Resolve notebook + section
+  const nbId = await getNotebookIdByName(notebookName);
+  const secId = await getSectionIdByName(nbId, sectionName);
+
+  // 2) Create page
+  const { body, boundary } = buildMultipartForPageHtml(html, title);
+  const created = await graphFetch(
+    `/me/onenote/sections/${encodeURIComponent(secId)}/pages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`
+      },
+      body
+    }
+  );
+
+  // "created" is the Page entity; capture id + links
+  const pageId = created?.id;
+  const links = created?.links || {};
+  if (!pageId || !links?.oneNoteWebUrl || !links?.oneNoteClientUrl) {
+    // fallback fetch (select links if not returned by creation response)
+    const p = await graphFetch(`/me/onenote/pages/${encodeURIComponent(pageId)}?$select=id,links`);
+    links.oneNoteWebUrl   = p?.links?.oneNoteWebUrl   || links.oneNoteWebUrl;
+    links.oneNoteClientUrl= p?.links?.oneNoteClientUrl|| links.oneNoteClientUrl;
+  }
+  return { pageId, links };
+}
+
+async function readPageFirstLines(pageId) {
+  // Pull HTML content and reduce to first lines
+  const html = await graphFetch(`/me/onenote/pages/${encodeURIComponent(pageId)}/content?includeIDs=true`, {
+    headers: { 'Accept': 'text/html' }
+  });
+  const text = stripHtml(html);
+  return text.slice(0, 600); // keep it succinct
+}
+
+// ====== HANDLER ======
 export default async function handler(req, res) {
   cors(res);
 
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
 
-  // 🔑 Bearer auth (stop using cookies/sessions here)
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) {
-    return res.status(401).json({ ok: false, error: 'Missing Bearer token' });
+  if (!assertBearer(req, res)) return; // Bearer check (router token)
+
+  try {
+    const { title, html } = req.body || {};
+    if (typeof title !== 'string' || typeof html !== 'string' || !title || !html) {
+      return res.status(400).json({ ok: false, error: 'Invalid body: { title, html } are required strings' });
+    }
+
+    // Create -> Read -> Return
+    const NOTEBOOK = 'AliceChatGPT';
+    const SECTION  = 'Inbox';
+
+    const { pageId, links } = await createOneNotePage({
+      notebookName: NOTEBOOK,
+      sectionName: SECTION,
+      title,
+      html
+    });
+
+    const text = await readPageFirstLines(pageId);
+
+    return res.status(200).json({
+      ok: true,
+      created: { id: pageId },
+      text,
+      links: {
+        oneNoteWebUrl: links.oneNoteWebUrl,
+        oneNoteClientUrl: links.oneNoteClientUrl
+      }
+    });
+
+  } catch (err) {
+    const status = err?.status || 500;
+    const detail = err?.body || err?.message || 'Internal Error';
+    return res.status(status).json({ ok: false, error: detail });
   }
-  const token = auth.slice('Bearer '.length).trim();
-  const expected = process.env.ACTION_BEARER_TOKEN;
-  if (!expected) return res.status(500).json({ ok: false, error: 'Server misconfig: ACTION_BEARER_TOKEN not set' });
-  if (token !== expected) return res.status(401).json({ ok: false, error: 'Invalid token' });
-
-  // ✅ Validate input
-  const { title, html } = req.body || {};
-  if (typeof title !== 'string' || typeof html !== 'string' || !title || !html) {
-    return res.status(400).json({ ok: false, error: 'Invalid body: { title, html } are required strings' });
-  }
-
-  // === YOUR REAL ONENOTE LOGIC GOES HERE ===
-  // 1) Create page in Notebook=AliceChatGPT, Section=Inbox (hardcoded in your code)
-  // 2) Read back first lines -> text
-  // 3) Build links { oneNoteWebUrl, oneNoteClientUrl }
-
-  // Stub response to prove auth path works; replace with real result.
-  const createdId = 'mock-' + Math.random().toString(36).slice(2, 10);
-  const text = 'First lines from created page…';
-  const links = {
-    oneNoteWebUrl: `https://example.com/onenote/${createdId}`,
-    oneNoteClientUrl: `onenote:https://example.com/onenote/${createdId}`
-  };
-
-  return res.status(200).json({ ok: true, created: { id: createdId }, text, links });
 }
