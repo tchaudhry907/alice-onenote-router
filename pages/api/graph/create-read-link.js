@@ -1,17 +1,17 @@
 // pages/api/graph/create-read-link.js
 
-import { getAccessToken } from '../../lib/auth'; // adjust path if needed
+import { getAccessToken } from '../../../lib/auth.js'; // <-- lib at repo root
 
 const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN';
 
-// ====== CORS ======
+// ===== CORS =====
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
-// ====== AUTH CHECK ======
+// ===== Router Bearer (Custom GPT -> Router) =====
 function assertBearer(req, res) {
   const expected = process.env[ACTION_TOKEN_ENV];
   if (!expected) {
@@ -31,10 +31,11 @@ function assertBearer(req, res) {
   return true;
 }
 
-// ====== GRAPH HELPERS ======
+// ===== Microsoft Graph helpers =====
 async function graphFetch(path, { method = 'GET', headers = {}, body } = {}) {
   const accessToken = await getAccessToken();
   if (!accessToken) throw new Error('Could not obtain Graph access token');
+
   const url = `https://graph.microsoft.com/v1.0${path}`;
   const res = await fetch(url, { method, headers: { Authorization: `Bearer ${accessToken}`, ...headers }, body });
   if (!res.ok) {
@@ -112,7 +113,7 @@ async function readPageFirstLines(pageId) {
   return text.slice(0, 600);
 }
 
-// ====== HANDLER ======
+// ===== Handler =====
 export default async function handler(req, res) {
   cors(res);
 
