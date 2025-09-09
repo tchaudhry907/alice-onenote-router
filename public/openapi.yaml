@@ -8,53 +8,42 @@ servers:
 paths:
   /api/graph/create-read-link:
     post:
-      summary: Create a page in Inbox, read text, and return links
       operationId: createReadLink
+      summary: Create a page in Inbox, read text, and return links
       security:
-        - ServiceBearerAuth: []
+        - serviceBearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              properties:
-                title:
-                  type: string
-                html:
-                  type: string
               required: [title, html]
+              properties:
+                title: { type: string }
+                html:  { type: string }
       responses:
-        '200':
+        "200":
           description: OK
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  ok:
-                    type: boolean
+                  ok:      { type: boolean }
                   created:
                     type: object
                     properties:
-                      id:
-                        type: string
-                  text:
-                    type: string
+                      id:   { type: string }
+                  text:    { type: string }
                   links:
                     type: object
                     properties:
-                      oneNoteWebUrl:
-                        type: string
-                      oneNoteClientUrl:
-                        type: string
-
+                      oneNoteWebUrl:    { type: string }
+                      oneNoteClientUrl: { type: string }
 components:
   securitySchemes:
-    ServiceBearerAuth:
+    serviceBearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-
-security:
-  - ServiceBearerAuth: []
