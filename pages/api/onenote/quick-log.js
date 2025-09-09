@@ -1,6 +1,6 @@
 // pages/api/onenote/quick-log.js
 
-import { getAccessToken } from '../../lib/auth';
+import { getAccessToken } from '../../../lib/auth.js'; // <-- lib at repo root
 
 const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN';
 
