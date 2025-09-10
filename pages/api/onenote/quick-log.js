@@ -1,79 +1,45 @@
-// pages/api/onenote/quick-log.js
-import { getAccessToken } from '../../../lib/auth.js';
-
-const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN';
+import { getAccessToken, requireAuth } from '../../../lib/auth.js';
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
-function assertBearer(req, res) {
-  const expected = process.env[ACTION_TOKEN_ENV];
-  if (!expected) {
-    res.status(500).json({ ok: false, error: `Server misconfig: ${ACTION_TOKEN_ENV} not set` });
-    return null;
-  }
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) return res.status(401).json({ ok: false, error: 'Missing Bearer token' });
-  const token = auth.slice('Bearer '.length).trim();
-  if (token !== expected) return res.status(401).json({ ok: false, error: 'Invalid token' });
-  return true;
-}
-
-function userPrefix() {
-  const upn = process.env.MS_USER_UPN;
-  if (!upn) throw new Error('MS_USER_UPN not set (email/UPN of OneNote owner)');
-  return `/users/${encodeURIComponent(upn)}`;
-}
 
 async function graphFetch(path, { method = 'GET', headers = {}, body } = {}) {
-  const accessToken = await getAccessToken();
+  const token = await getAccessToken();
   const url = `https://graph.microsoft.com/v1.0${path}`;
-  const res = await fetch(url, { method, headers: { Authorization: `Bearer ${accessToken}`, ...headers }, body });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    const err = new Error(`Graph ${method} ${path} -> ${res.status}`);
-    err.status = res.status;
-    err.body = text;
-    throw err;
-  }
-  const ct = res.headers.get('content-type') || '';
-  return ct.includes('application/json') ? res.json() : res.text();
-}
-
-function buildMultipartForPageHtml(html, title) {
-  const boundary = '----AliceOneLoggerV3' + Math.random().toString(36).slice(2);
-  const head = `--${boundary}\r\nContent-Disposition: form-data; name="Presentation"\r\nContent-Type: text/html\r\n\r\n`;
-  const htmlDoc = `<!DOCTYPE html><html><head><title>${title}</title></head><body>${html}</body></html>`;
-  const tail = `\r\n--${boundary}--`;
-  const body = Buffer.from(head + htmlDoc + tail, 'utf8');
-  return { body, boundary };
+  const r = await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, ...headers }, body });
+  if (!r.ok) { const text = await r.text().catch(()=>''); const e=new Error(text); e.status=r.status; throw e; }
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('application/json') ? r.json() : r.text();
 }
 
 export default async function handler(req, res) {
   cors(res);
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
-  if (!assertBearer(req, res)) return;
+  if (!requireAuth(req, res)) return;
 
   try {
     const { text } = req.body || {};
-    if (typeof text !== 'string' || !text) return res.status(400).json({ ok: false, error: 'Invalid body: { text } is required string' });
+    if (!text) return res.status(400).json({ ok: false, error: 'text required' });
 
-    const NOTEBOOK = 'AliceChatGPT';
-    const SECTION  = 'Inbox';
+    const nbs = await graphFetch(`/me/onenote/notebooks?$select=id,displayName`);
+    const nb = (nbs.value || []).find(n => n.displayName === 'AliceChatGPT');
+    if (!nb) throw new Error('Notebook not found: AliceChatGPT');
 
-    // resolve notebook + section IDs
-    const notebooks = await graphFetch(`${userPrefix()}/onenote/notebooks?$select=id,displayName`);
-    const nb = (notebooks.value || []).find(n => n.displayName === NOTEBOOK);
-    if (!nb) throw new Error(`Notebook not found: ${NOTEBOOK}`);
-    const sections = await graphFetch(`${userPrefix()}/onenote/notebooks/${encodeURIComponent(nb.id)}/sections?$select=id,displayName`);
-    const inbox = (sections.value || []).find(s => s.displayName === SECTION);
-    if (!inbox) throw new Error(`Section not found: ${SECTION}`);
+    const secs = await graphFetch(`/me/onenote/notebooks/${encodeURIComponent(nb.id)}/sections?$select=id,displayName`);
+    const inbox = (secs.value || []).find(s => s.displayName === 'Inbox');
+    if (!inbox) throw new Error('Section not found: Inbox');
 
-    const { body, boundary } = buildMultipartForPageHtml(`<p>${text}</p>`, '[QUICK-LOG]');
-    await graphFetch(`${userPrefix()}/onenote/sections/${encodeURIComponent(inbox.id)}/pages`, {
+    const boundary = '----AliceOneLoggerV3' + Math.random().toString(36).slice(2);
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="Presentation"\r\nContent-Type: text/html\r\n\r\n`;
+    const htmlDoc = `<!DOCTYPE html><html><head><title>[QUICK-LOG]</title></head><body><p>${text}</p></body></html>`;
+    const tail = `\r\n--${boundary}--`;
+    const body = Buffer.from(head + htmlDoc + tail, 'utf8');
+
+    await graphFetch(`/me/onenote/sections/${encodeURIComponent(inbox.id)}/pages`, {
       method: 'POST',
       headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
       body
@@ -81,8 +47,14 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true });
   } catch (err) {
+    if (err?.auth_required) {
+      return res.status(401).json({
+        ok: false,
+        error: 'AUTH_REQUIRED',
+        next: { how: 'POST /api/auth/device-code { "action": "begin" } then poll with { "action": "poll" }' }
+      });
+    }
     const status = err?.status || 500;
-    const detail = err?.body || err?.message || 'Internal Error';
-    return res.status(status).json({ ok: false, error: detail });
+    return res.status(status).json({ ok: false, error: err?.message || 'Internal Error' });
   }
 }
