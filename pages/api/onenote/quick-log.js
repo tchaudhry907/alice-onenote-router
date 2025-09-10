@@ -1,6 +1,5 @@
 // pages/api/onenote/quick-log.js
-
-import { getAccessToken } from '../../../lib/auth.js'; // <-- lib at repo root
+import { getAccessToken } from '../../../lib/auth.js';
 
 const ACTION_TOKEN_ENV = 'ACTION_BEARER_TOKEN';
 
@@ -9,7 +8,6 @@ function cors(res) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
-
 function assertBearer(req, res) {
   const expected = process.env[ACTION_TOKEN_ENV];
   if (!expected) {
@@ -17,21 +15,20 @@ function assertBearer(req, res) {
     return null;
   }
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) {
-    res.status(401).json({ ok: false, error: 'Missing Bearer token' });
-    return null;
-  }
+  if (!auth.startsWith('Bearer ')) return res.status(401).json({ ok: false, error: 'Missing Bearer token' });
   const token = auth.slice('Bearer '.length).trim();
-  if (token !== expected) {
-    res.status(401).json({ ok: false, error: 'Invalid token' });
-    return null;
-  }
+  if (token !== expected) return res.status(401).json({ ok: false, error: 'Invalid token' });
   return true;
+}
+
+function userPrefix() {
+  const upn = process.env.MS_USER_UPN;
+  if (!upn) throw new Error('MS_USER_UPN not set (email/UPN of OneNote owner)');
+  return `/users/${encodeURIComponent(upn)}`;
 }
 
 async function graphFetch(path, { method = 'GET', headers = {}, body } = {}) {
   const accessToken = await getAccessToken();
-  if (!accessToken) throw new Error('Could not obtain Graph access token');
   const url = `https://graph.microsoft.com/v1.0${path}`;
   const res = await fetch(url, { method, headers: { Authorization: `Bearer ${accessToken}`, ...headers }, body });
   if (!res.ok) {
@@ -56,31 +53,27 @@ function buildMultipartForPageHtml(html, title) {
 
 export default async function handler(req, res) {
   cors(res);
-
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
-
   if (!assertBearer(req, res)) return;
 
   try {
     const { text } = req.body || {};
-    if (typeof text !== 'string' || !text) {
-      return res.status(400).json({ ok: false, error: 'Invalid body: { text } is required string' });
-    }
+    if (typeof text !== 'string' || !text) return res.status(400).json({ ok: false, error: 'Invalid body: { text } is required string' });
 
     const NOTEBOOK = 'AliceChatGPT';
-    const SECTION = 'Inbox';
+    const SECTION  = 'Inbox';
 
     // resolve notebook + section IDs
-    const notebooks = await graphFetch(`/me/onenote/notebooks?$select=id,displayName`);
+    const notebooks = await graphFetch(`${userPrefix()}/onenote/notebooks?$select=id,displayName`);
     const nb = (notebooks.value || []).find(n => n.displayName === NOTEBOOK);
     if (!nb) throw new Error(`Notebook not found: ${NOTEBOOK}`);
-    const sections = await graphFetch(`/me/onenote/notebooks/${encodeURIComponent(nb.id)}/sections?$select=id,displayName`);
+    const sections = await graphFetch(`${userPrefix()}/onenote/notebooks/${encodeURIComponent(nb.id)}/sections?$select=id,displayName`);
     const inbox = (sections.value || []).find(s => s.displayName === SECTION);
     if (!inbox) throw new Error(`Section not found: ${SECTION}`);
 
     const { body, boundary } = buildMultipartForPageHtml(`<p>${text}</p>`, '[QUICK-LOG]');
-    await graphFetch(`/me/onenote/sections/${encodeURIComponent(inbox.id)}/pages`, {
+    await graphFetch(`${userPrefix()}/onenote/sections/${encodeURIComponent(inbox.id)}/pages`, {
       method: 'POST',
       headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
       body
