@@ -1,12 +1,18 @@
-// pages/api/graph/me.js
-import { graphGET } from "@/lib/auth";
+import { getAccessToken } from "@/lib/auth";
 
 export default async function handler(req, res) {
   try {
-    const me = await graphGET(req, "/me");
-    return res.status(200).json(me);
+    const token = await getAccessToken(req);
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "No access token" });
+    }
+
+    const r = await fetch("https://graph.microsoft.com/v1.0/me", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const json = await r.json();
+    res.status(r.status).json(json);
   } catch (err) {
-    const msg = err?.message || String(err);
-    return res.status(err?.status || 500).json({ ok: false, error: msg });
+    res.status(500).json({ ok: false, error: err.message });
   }
 }
