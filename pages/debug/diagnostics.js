@@ -1,18 +1,13 @@
 // pages/debug/diagnostics.js
-// Client-only diagnostics dashboard for auth + Graph quick-tests.
-
 import { useEffect, useMemo, useState } from "react";
-
-// Prevent Next from trying to pre-render dynamic data at build time
-export const config = { unstable_runtimeJS: true };
 
 export default function Diagnostics() {
   const [tokens, setTokens] = useState(null);
   const [status, setStatus] = useState("No tokens captured yet");
-
   const [seedResult, setSeedResult] = useState(null);
   const [meResult, setMeResult] = useState(null);
   const [createResult, setCreateResult] = useState(null);
+  const [batchResult, setBatchResult] = useState(null);
 
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -22,7 +17,7 @@ export default function Diagnostics() {
   const wantFull = useMemo(() => {
     if (typeof window === "undefined") return false;
     const p = new URLSearchParams(window.location.search);
-    return ["1", "true", "yes"].includes((p.get("full") || "").toLowerCase());
+    return ["1","true","yes"].includes((p.get("full") || "").toLowerCase());
   }, []);
 
   async function reloadTokens() {
@@ -36,16 +31,10 @@ export default function Diagnostics() {
       setStatus("Failed to load tokens");
     }
   }
-
   useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
 
-  // ---- helpers -------------------------------------------------------------
-
   async function copyAuthHeader() {
-    if (!tokens?.access_token) {
-      alert("No access_token in memory. Click Refresh Tokens first, then Reload Tokens.");
-      return;
-    }
+    if (!tokens?.access_token) { alert("No access_token in memory."); return; }
     const s = `Authorization: Bearer ${tokens.access_token}`;
     await navigator.clipboard.writeText(s);
     alert("Copied Authorization header to clipboard.");
@@ -53,18 +42,18 @@ export default function Diagnostics() {
 
   async function seedServerWithTokens() {
     if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
-      alert("Need access_token, refresh_token, and id_token to seed the server. Click ‘Refresh Tokens’, then ‘Reload Tokens’.");
+      alert("Need access_token, refresh_token, and id_token. Click “Refresh Tokens”, then Reload Tokens.");
       return;
     }
     const r = await fetch("/api/debug/tokens/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "include",
       body: JSON.stringify({
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         id_token: tokens.id_token,
       }),
+      credentials: "include",
     });
     const j = await r.json();
     setSeedResult(j);
@@ -72,78 +61,42 @@ export default function Diagnostics() {
   }
 
   async function callGraphMe() {
-    // Prefer cookie session; fallback to clipboard Authorization if present.
-    const opts = { credentials: "include" };
-    try {
-      const r = await fetch("/api/graph/me", opts);
-      if (r.status === 401) {
-        const auth = await readAuthFromClipboard();
-        if (auth) {
-          const r2 = await fetch("/api/graph/me", { headers: { Authorization: auth }, credentials: "include" });
-          const j2 = await r2.json();
-          setMeResult(j2);
-          return;
-        }
-      }
-      const j = await r.json();
-      setMeResult(j);
-    } catch (e) {
-      setMeResult({ error: String(e) });
-    }
+    const r = await fetch("/api/graph/me", { credentials: "include" });
+    const j = await r.json();
+    setMeResult(j);
   }
 
   async function createTestPage() {
-    // Prefer cookie session; fallback to clipboard Authorization if present.
     setCreateResult({ loading: true });
-    const body = {
-      notebookName: "AliceChatGPT",
-      sectionName: "Hobbies",
-      title: "[DIAG] Test page from Diagnostics",
-      html: "<p>Created via Diagnostics button ✅</p>",
-    };
-
-    let r = await fetch("/api/debug/create-test-page", {
+    const r = await fetch("/api/debug/create-test-page", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        notebookName: "AliceChatGPT",
+        sectionName: "Hobbies",
+        title: "[DIAG] Test page from Diagnostics",
+        html: "<p>Created via Diagnostics button ✅</p>",
+      }),
     });
-
-    if (r.status === 401) {
-      const auth = await readAuthFromClipboard();
-      if (auth) {
-        r = await fetch("/api/debug/create-test-page", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          credentials: "include",
-          body: JSON.stringify(body),
-        });
-      }
-    }
-
-    try {
-      const j = await r.json();
-      setCreateResult(j);
-    } catch (e) {
-      setCreateResult({ ok: false, error: `Non-JSON response: ${e}` });
-    }
+    const j = await r.json();
+    setCreateResult(j);
   }
 
-  async function readAuthFromClipboard() {
-    if (typeof navigator?.clipboard?.readText !== "function") return null;
-    try {
-      const raw = (await navigator.clipboard.readText()).trim();
-      if (!raw) return null;
-      if (/^Authorization:\s*Bearer\s+/.test(raw)) return raw;
-      if (/^Bearer\s+/.test(raw)) return `Authorization: ${raw}`;
-      // Assume raw token
-      return `Authorization: Bearer ${raw}`;
-    } catch {
-      return null;
-    }
+  async function batchCreateSections() {
+    setBatchResult({ loading: true });
+    const r = await fetch("/api/graph/sections-create-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        notebookName: "AliceChatGPT",
+        sectionNames: ["Hobbies", "Travel", "Taxes"],
+      }),
+    });
+    const j = await r.json();
+    setBatchResult(j);
   }
-
-  // ---- UI -----------------------------------------------------------------
 
   return (
     <main style={{ padding: 24, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
@@ -162,8 +115,8 @@ export default function Diagnostics() {
 
       <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
         <pre style={{ whiteSpace: "pre-wrap" }}>
-{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${(tokens.access_token || "").slice(0,30)}…\n\n` : ""}
-{tokens ? JSON.stringify(tokens, null, 2) : "—"}
+{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${tokens.access_token.slice(0,30)}…\n\n` : ""}
+{JSON.stringify(tokens, null, 2)}
         </pre>
       </Section>
 
@@ -173,6 +126,7 @@ export default function Diagnostics() {
         <button className="btn" onClick={seedServerWithTokens}>Seed server with tokens</button>
         <button className="btn" onClick={callGraphMe}>Call Graph /me (server)</button>
         <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
+        <button className="btn" onClick={batchCreateSections}>Create Sections (batch)</button>
       </div>
 
       <Section title="Seed Result">
@@ -185,6 +139,10 @@ export default function Diagnostics() {
 
       <Section title="Create Test Page Result">
         <pre>{createResult ? JSON.stringify(createResult, null, 2) : "—"}</pre>
+      </Section>
+
+      <Section title="Create Sections (batch) Result">
+        <pre>{batchResult ? JSON.stringify(batchResult, null, 2) : "—"}</pre>
       </Section>
 
       <style jsx>{`
