@@ -1,138 +1,120 @@
 // pages/api/graph/create-read-link.js
-// Route version: r2-CRLF
+// Creates a OneNote page and returns OneNote links.
+// Accepts either Authorization header OR an `access_token` cookie.
+// Supports either { sectionId } OR { notebookName, sectionName }.
+
+// Helper: safe JSON stringify
+function s(x) { try { return JSON.stringify(x); } catch { return String(x); } }
+function escapeHtml(v) {
+  return String(v).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "POST only", version: "r2-CRLF" });
+    res.setHeader("Allow", "POST");
+    return res.status(405).json({ ok: false, error: "Use POST" });
   }
 
+  // 0) Auth: header OR cookie
+  const bearer =
+    req.headers.authorization ||
+    (req.cookies?.access_token ? `Bearer ${req.cookies.access_token}` : "");
+  if (!bearer) return res.status(401).json({ ok: false, error: "No access token" });
+
+  // 1) Input
+  const {
+    // choose ONE of these two paths:
+    sectionId,
+    notebookName,
+    sectionName,
+
+    // content
+    title = "[Untitled]",
+    html = "<p>(empty)</p>",
+  } = (req.body || {});
+
   try {
-    const bearer = getBearer(req);
-    if (!bearer) return res.status(401).json({ ok: false, error: "No access token", version: "r2-CRLF" });
-
-    const { title = "", html = "<p></p>", sectionId, notebookName, sectionName } = req.body || {};
-    let resolvedSectionId = sectionId || null;
-    let resolvedFrom = "body.sectionId";
-
-    // If names provided, resolve to Graph section id
-    if (!resolvedSectionId && (notebookName || sectionName)) {
+    // 2) Resolve sectionId if only names were provided
+    let resolvedSectionId = sectionId;
+    if (!resolvedSectionId) {
       if (!notebookName || !sectionName) {
         return res.status(400).json({
           ok: false,
-          error: "When using names, provide both notebookName and sectionName",
-          version: "r2-CRLF",
+          error: "No section specified (sectionId OR notebookName+sectionName required).",
         });
       }
-      const nbRes = await graphGET(bearer, `/me/onenote/notebooks?$select=id,displayName`);
-      const nb = (nbRes?.value || []).find(
-        (n) => (n.displayName || "").toLowerCase() === String(notebookName).toLowerCase()
-      );
-      if (!nb) return res.status(404).json({ ok: false, error: `Notebook not found: ${notebookName}`, version: "r2-CRLF" });
 
-      const secRes = await graphGET(bearer, `/me/onenote/notebooks/${encodeURIComponent(nb.id)}/sections?$select=id,displayName`);
-      const sec = (secRes?.value || []).find(
-        (s) => (s.displayName || "").toLowerCase() === String(sectionName).toLowerCase()
+      // 2a) find notebook
+      const nbResp = await fetch(
+        "https://graph.microsoft.com/v1.0/me/onenote/notebooks?$select=id,displayName",
+        { headers: { Authorization: bearer } }
       );
-      if (!sec) return res.status(404).json({ ok: false, error: `Section not found: ${sectionName}`, version: "r2-CRLF" });
+      const nbJson = await nbResp.json();
+      if (!nbResp.ok) throw new Error(`graph GET notebooks -> ${nbResp.status}: ${s(nbJson)}`);
 
-      resolvedSectionId = sec.id;           // <-- Graph GUID style
-      resolvedFrom = "lookup.names";
+      const notebook = (nbJson.value || []).find(
+        n => (n.displayName || "").trim().toLowerCase() === notebookName.trim().toLowerCase()
+      );
+      if (!notebook) throw new Error(`Notebook not found: ${notebookName}`);
+
+      // 2b) find section inside notebook
+      const secResp = await fetch(
+        `https://graph.microsoft.com/v1.0/me/onenote/notebooks/${encodeURIComponent(
+          notebook.id
+        )}/sections?$select=id,displayName`,
+        { headers: { Authorization: bearer } }
+      );
+      const secJson = await secResp.json();
+      if (!secResp.ok) throw new Error(`graph GET sections -> ${secResp.status}: ${s(secJson)}`);
+
+      const section = (secJson.value || []).find(
+        sct => (sct.displayName || "").trim().toLowerCase() === sectionName.trim().toLowerCase()
+      );
+      if (!section) throw new Error(`Section not found: ${sectionName}`);
+      resolvedSectionId = section.id;
     }
 
-    if (!resolvedSectionId) {
-      return res.status(400).json({
-        ok: false,
-        error: "No section specified (sectionId or notebookName+sectionName required).",
-        version: "r2-CRLF",
-      });
-    }
+    // 3) Build correct multipart body (CRLF with custom boundary)
+    const boundary = "----AliceCreateBoundary" + Math.random().toString(36).slice(2);
+    const htmlDoc =
+      `<!DOCTYPE html><html><head><title>${escapeHtml(title)}</title></head>` +
+      `<body>${html}</body></html>`;
 
-    // Build strict CRLF multipart body
-    const { body, boundary } = buildOneNoteMultipart(title, html);
+    const body =
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="Presentation"\r\n` +
+      `Content-Type: text/html\r\n\r\n` +
+      htmlDoc + `\r\n` +
+      `--${boundary}--\r\n`;
 
-    // Create page
-    const created = await graphPOST(
-      bearer,
-      `/me/onenote/sections/${encodeURIComponent(resolvedSectionId)}/pages`,
-      body,
-      `multipart/form-data; boundary=${boundary}`
+    // 4) Create page
+    const createResp = await fetch(
+      `https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(resolvedSectionId)}/pages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: bearer,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        },
+        body,
+      }
     );
 
-    const links = created?.links || {};
+    const created = await createResp.json();
+    if (!createResp.ok) {
+      // Surface Graph error clearly
+      throw new Error(`graph POST create page -> ${createResp.status}: ${s(created)}`);
+    }
+
+    // 5) Return links in a stable shape
+    // created.links.oneNoteClientUrl / oneNoteWebUrl may already exist; if not, compute nothing
     return res.status(200).json({
       ok: true,
-      created: { id: created?.id || null },
-      links: {
-        oneNoteClientUrl: links.oneNoteClientUrl || null,
-        oneNoteWebUrl: links.oneNoteWebUrl || null,
-      },
-      debug: { version: "r2-CRLF", usedSectionId: resolvedSectionId, resolvedFrom },
+      created,
+      links: created.links || undefined,
     });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: toErr(err), version: "r2-CRLF" });
+  } catch (e) {
+    // Keep 200 with ok:false so the UI can show the message without a network error
+    return res.status(200).json({ ok: false, error: String(e?.message || e) });
   }
 }
-
-/* ---------------- helpers ---------------- */
-
-function getBearer(req) {
-  const h = req.headers || {};
-  const auth = h.authorization || h.Authorization;
-  if (auth && /^Bearer\s+/i.test(auth)) {
-    const token = auth.replace(/^Bearer\s+/i, "").trim();
-    if (token) return `Bearer ${token}`;
-  }
-  // (Optional) fall back to cookie
-  const ck = h.cookie || "";
-  const token = getCookieValue(ck, "access_token");
-  if (token) return `Bearer ${token}`;
-  return null;
-}
-function getCookieValue(cookieHeader, name) {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(";")) {
-    const p = part.trim();
-    const i = p.indexOf("=");
-    if (i > 0 && p.slice(0, i) === name) return decodeURIComponent(p.slice(i + 1));
-  }
-  return null;
-}
-
-async function graphGET(bearer, path) {
-  const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-    method: "GET",
-    headers: { Authorization: bearer },
-  });
-  if (!r.ok) throw new Error(`graph GET ${path} -> ${r.status}: ${await safeText(r)}`);
-  return r.json();
-}
-async function graphPOST(bearer, path, body, contentType) {
-  const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-    method: "POST",
-    headers: { Authorization: bearer, "Content-Type": contentType },
-    body,
-  });
-  if (!r.ok) throw new Error(`graph POST ${path} -> ${r.status}: ${await safeText(r)}`);
-  return r.json();
-}
-async function safeText(r) { try { return await r.text(); } catch { return ""; } }
-
-function buildOneNoteMultipart(title, html) {
-  const boundary = "oneNoteBoundary_" + Math.random().toString(36).slice(2);
-  const lines = [
-    `--${boundary}`,
-    `Content-Disposition: form-data; name="Presentation"`,
-    `Content-Type: text/html`,
-    ``,
-    `<!DOCTYPE html><html><head><title>${escapeHtml(title || "")}</title></head><body>${html || "<p></p>"}</body></html>`,
-    `--${boundary}--`,
-    ``,
-  ];
-  // IMPORTANT: CRLF required for multipart
-  const body = lines.join("\r\n");
-  return { body, boundary };
-}
-function escapeHtml(s) {
-  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-}
-function toErr(e) { if (!e) return "Unknown error"; if (e instanceof Error) return e.message; try { return JSON.stringify(e); } catch { return String(e); } }
