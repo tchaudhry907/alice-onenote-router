@@ -1,73 +1,57 @@
 // pages/api/graph/sections-create-batch.js
-
-import { getAccessToken } from '@/lib/auth';
-
-async function resolveToken(req, res) {
-  const auth = req.headers?.authorization || '';
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (m && m[1]) return m[1];
-  const t = await getAccessToken(req, res);
-  return t || null;
-}
-
-async function graphGET(path, token) {
-  const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  if (!r.ok) throw new Error(`graphGET ${path} -> ${r.status}: ${await r.text().catch(()=> '')}`);
-  return r.json();
-}
-
-async function graphPOST(path, body, token) {
-  const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!r.ok) throw new Error(`graphPOST ${path} -> ${r.status}: ${await r.text().catch(()=> '')}`);
-  return r.json();
-}
+import { getBearerFromReq, graphGET, graphPOST } from "@/lib/auth";
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
+
   try {
-    const token = await resolveToken(req, res);
-    if (!token) return res.status(401).json({ error: 'No access token' });
-
-    const { notebookName, notebookId, sectionNames = [] } = req.body || {};
-    if ((!notebookName && !notebookId) || !Array.isArray(sectionNames) || sectionNames.length === 0) {
-      return res.status(400).json({ error: 'notebookName or notebookId, and sectionNames[] are required' });
+    const token = getBearerFromReq(req);
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "Missing access token (send Authorization: Bearer …)" });
     }
 
-    let nbId = notebookId;
-    if (!nbId) {
-      const nbRes = await graphGET(`/me/onenote/notebooks?$select=id,displayName`, token);
-      const notebooks = nbRes.value || nbRes.notebooks || [];
-      const nb = notebooks.find(
-        (n) => (n.displayName || n.name || '').toLowerCase() === String(notebookName || '').toLowerCase()
-      );
-      if (!nb) return res.status(404).json({ error: `Notebook not found: ${notebookName}` });
-      nbId = nb.id;
+    const { notebookName, sectionNames = [] } = req.body || {};
+    if (!notebookName || !Array.isArray(sectionNames) || sectionNames.length === 0) {
+      return res.status(400).json({ ok: false, error: "Provide { notebookName, sectionNames: [..] }" });
     }
+
+    const nbRes = await graphGET(token, `/me/onenote/notebooks?$select=id,displayName`);
+    const notebooks = nbRes.value || nbRes.notebooks || [];
+    const nb = notebooks.find(
+      (n) => (n.displayName || n.name || "").toLowerCase() === String(notebookName).toLowerCase()
+    );
+    if (!nb) {
+      return res.status(404).json({ ok: false, error: `Notebook not found: ${notebookName}` });
+    }
+
+    const existingSecRes = await graphGET(token, `/me/onenote/notebooks/${nb.id}/sections?$select=id,displayName`);
+    const existing = (existingSecRes.value || existingSecRes.sections || []).map(s => ({
+      id: s.id,
+      name: (s.displayName || s.name || "").toLowerCase()
+    }));
 
     const created = [];
-    for (const name of sectionNames) {
-      // Try existing
-      const secRes = await graphGET(`/me/onenote/notebooks/${nbId}/sections?$select=id,displayName`, token);
-      const secs = secRes.value || secRes.sections || [];
-      const existing = secs.find((s) => (s.displayName || s.name || '').toLowerCase() === String(name).toLowerCase());
-      if (existing) {
-        created.push({ name, id: existing.id, existed: true });
+    const skipped = [];
+
+    for (const s of sectionNames) {
+      const target = String(s || "").trim();
+      if (!target) continue;
+      const lower = target.toLowerCase();
+      const already = existing.find((e) => e.name === lower);
+      if (already) {
+        skipped.push({ name: target, id: already.id });
         continue;
       }
-      const newSec = await graphPOST(`/me/onenote/notebooks/${nbId}/sections`, { displayName: name }, token);
-      created.push({ name, id: newSec?.id || null, existed: false });
+      const r = await graphPOST(token, `/me/onenote/notebooks/${nb.id}/sections`, { displayName: target });
+      created.push({ name: r?.displayName || target, id: r?.id || null });
     }
 
-    return res.status(200).json({ ok: true, notebookId: nbId, created });
+    return res.status(200).json({ ok: true, notebookId: nb.id, created, skipped });
   } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = err?.status || 500;
+    return res.status(code).json({ ok: false, error: msg });
   }
 }
