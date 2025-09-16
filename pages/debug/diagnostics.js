@@ -7,7 +7,8 @@ export default function Diagnostics() {
   const [seedResult, setSeedResult] = useState(null);
   const [meResult, setMeResult] = useState(null);
   const [createResult, setCreateResult] = useState(null);
-  const [batchResult, setBatchResult] = useState(null);
+  const [sweepResult, setSweepResult] = useState(null);
+  const [emptyResult, setEmptyResult] = useState(null);
 
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -31,6 +32,7 @@ export default function Diagnostics() {
       setStatus("Failed to load tokens");
     }
   }
+
   useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
 
   async function copyAuthHeader() {
@@ -42,28 +44,26 @@ export default function Diagnostics() {
 
   async function seedServerWithTokens() {
     if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
-      alert("Need access_token, refresh_token, and id_token. Click “Refresh Tokens”, then Reload Tokens.");
+      alert("Need access_token, refresh_token, and id_token. Click 'Refresh Tokens' then 'Reload Tokens' first.");
       return;
     }
     const r = await fetch("/api/debug/tokens/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         id_token: tokens.id_token,
       }),
-      credentials: "include",
     });
-    const j = await r.json();
-    setSeedResult(j);
+    setSeedResult(await r.json());
     await reloadTokens();
   }
 
   async function callGraphMe() {
     const r = await fetch("/api/graph/me", { credentials: "include" });
-    const j = await r.json();
-    setMeResult(j);
+    setMeResult(await r.json());
   }
 
   async function createTestPage() {
@@ -79,23 +79,34 @@ export default function Diagnostics() {
         html: "<p>Created via Diagnostics button ✅</p>",
       }),
     });
-    const j = await r.json();
-    setCreateResult(j);
+    setCreateResult(await r.json());
   }
 
-  async function batchCreateSections() {
-    setBatchResult({ loading: true });
-    const r = await fetch("/api/graph/sections-create-batch", {
+  async function sweepToBin() {
+    setSweepResult({ loading: true });
+    const r = await fetch("/api/onenote/sweep-to-bin", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({
         notebookName: "AliceChatGPT",
-        sectionNames: ["Hobbies", "Travel", "Taxes"],
-      }),
+        titlePrefixes: ["[DIAG]", "[WORKOUT]", "[HOBBY]", "[INBOX] quick note", "[STEPS]"],
+        recycleSectionName: "🗑 Recycle Bin"
+      })
     });
-    const j = await r.json();
-    setBatchResult(j);
+    setSweepResult(await r.json());
+  }
+
+  async function emptyBin() {
+    if (!confirm("Permanently delete everything in 🗑 Recycle Bin? This cannot be undone.")) return;
+    setEmptyResult({ loading: true });
+    const r = await fetch("/api/onenote/empty-bin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ notebookName: "AliceChatGPT", recycleSectionName: "🗑 Recycle Bin" })
+    });
+    setEmptyResult(await r.json());
   }
 
   return (
@@ -126,23 +137,24 @@ export default function Diagnostics() {
         <button className="btn" onClick={seedServerWithTokens}>Seed server with tokens</button>
         <button className="btn" onClick={callGraphMe}>Call Graph /me (server)</button>
         <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
-        <button className="btn" onClick={batchCreateSections}>Create Sections (batch)</button>
+        <button className="btn" onClick={sweepToBin}>Sweep test notes → Recycle Bin</button>
+        <button className="btn" onClick={emptyBin}>Empty Recycle Bin</button>
       </div>
 
       <Section title="Seed Result">
         <pre>{seedResult ? JSON.stringify(seedResult, null, 2) : "—"}</pre>
       </Section>
-
       <Section title="Graph /me Result">
         <pre>{meResult ? JSON.stringify(meResult, null, 2) : "—"}</pre>
       </Section>
-
       <Section title="Create Test Page Result">
         <pre>{createResult ? JSON.stringify(createResult, null, 2) : "—"}</pre>
       </Section>
-
-      <Section title="Create Sections (batch) Result">
-        <pre>{batchResult ? JSON.stringify(batchResult, null, 2) : "—"}</pre>
+      <Section title="Sweep Result">
+        <pre>{sweepResult ? JSON.stringify(sweepResult, null, 2) : "—"}</pre>
+      </Section>
+      <Section title="Empty Bin Result">
+        <pre>{emptyResult ? JSON.stringify(emptyResult, null, 2) : "—"}</pre>
       </Section>
 
       <style jsx>{`
