@@ -9,6 +9,7 @@ export default function Diagnostics() {
   const [createResult, setCreateResult] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
   const [cleanupResult, setCleanupResult] = useState(null);
+  const [sampleFoodResult, setSampleFoodResult] = useState(null);
 
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -18,13 +19,15 @@ export default function Diagnostics() {
   const wantFull = useMemo(() => {
     if (typeof window === "undefined") return false;
     const p = new URLSearchParams(window.location.search);
-    return ["1","true","yes"].includes((p.get("full") || "").toLowerCase());
+    return ["1", "true", "yes"].includes((p.get("full") || "").toLowerCase());
   }, []);
 
   async function reloadTokens() {
     if (!baseUrl) return;
     try {
-      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, { credentials: "include" }).then(r => r.json());
+      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, {
+        credentials: "include",
+      }).then((r) => r.json());
       setTokens(j);
       const hasAny = !!(j?.access_token || j?.refresh_token || j?.id_token);
       setStatus(hasAny ? "Tokens present" : "No tokens captured yet");
@@ -32,10 +35,15 @@ export default function Diagnostics() {
       setStatus("Failed to load tokens");
     }
   }
-  useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
+  useEffect(() => {
+    reloadTokens();
+  }, [baseUrl, wantFull]);
 
   async function copyAuthHeader() {
-    if (!tokens?.access_token) { alert("No access_token in memory."); return; }
+    if (!tokens?.access_token) {
+      alert("No access_token in memory.");
+      return;
+    }
     const s = `Authorization: Bearer ${tokens.access_token}`;
     await navigator.clipboard.writeText(s);
     alert("Copied Authorization header to clipboard.");
@@ -100,7 +108,7 @@ export default function Diagnostics() {
           "Hobbies",
           "Travel",
           "Taxes",
-          "Recycle Bin"
+          "Recycle Bin",
         ],
       }),
     });
@@ -118,10 +126,29 @@ export default function Diagnostics() {
     setCleanupResult(j);
   }
 
+  async function createSampleFood() {
+    setSampleFoodResult({ loading: true });
+    const r = await fetch("/api/graph/log-note", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        notebookName: "AliceChatGPT",
+        sectionName: "Food",
+        title: "[FOOD] Pumpkin pie — 300 cal",
+        html: "<p>Pumpkin pie slice. Estimated 300 kcal.</p>",
+      }),
+    });
+    const j = await r.json();
+    setSampleFoodResult(j);
+  }
+
   return (
     <main style={{ padding: 24, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
       <h1>Alice OneNote Router — Diagnostics</h1>
-      <p>Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong></p>
+      <p>
+        Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong>
+      </p>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0" }}>
         <a className="btn" href="/api/auth/logout">Hard Reset + Logout</a>
@@ -130,13 +157,20 @@ export default function Diagnostics() {
         <a className="btn" href="/api/debug/clear-cookies">Clear Session Cookies</a>
         <a className="btn" href="/">Logout (App)</a>
         <button className="btn" onClick={reloadTokens}>Reload Tokens</button>
-        <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">Open /api/debug/tokens?full=1</a>
+        <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">
+          Open /api/debug/tokens?full=1
+        </a>
       </div>
 
       <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
         <pre style={{ whiteSpace: "pre-wrap" }}>
-{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${tokens.access_token.slice(0,30)}…\n\n` : ""}
-{JSON.stringify(tokens, null, 2)}
+          {tokens?.access_token
+            ? `access_token length: ${tokens.access_token.length} · starts with:\n${tokens.access_token.slice(
+                0,
+                30
+              )}…\n\n`
+            : ""}
+          {JSON.stringify(tokens, null, 2)}
         </pre>
       </Section>
 
@@ -148,6 +182,7 @@ export default function Diagnostics() {
         <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
         <button className="btn" onClick={batchCreateSections}>Batch create sections</button>
         <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
+        <button className="btn" onClick={createSampleFood}>Create sample Food note</button>
       </div>
 
       <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
@@ -155,6 +190,7 @@ export default function Diagnostics() {
       <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
       <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
       <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
+      <Section title="Sample Food Log Result"><pre>{fmt(sampleFoodResult)}</pre></Section>
 
       <style jsx>{`
         .btn {
@@ -187,5 +223,9 @@ function Section({ title, children }) {
 function fmt(x) {
   if (!x) return "—";
   if (x.loading) return "Loading…";
-  try { return JSON.stringify(x, null, 2); } catch { return String(x); }
+  try {
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return String(x);
+  }
 }
