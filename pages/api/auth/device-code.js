@@ -12,22 +12,14 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).json({ ok: true });
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).json({ ok: true });
-  }
-
-  const method = req.method;
-  const action = (method === "GET" ? req.query?.action : req.body?.action) || "";
-
-  if (!["GET", "POST"].includes(method)) {
+  const action = (req.method === "GET" ? req.query?.action : req.body?.action) || "";
+  if (!["GET", "POST"].includes(req.method)) {
     res.setHeader("Allow", "GET,POST,OPTIONS");
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
-
-  if (!action) {
-    return res.status(400).json({ ok: false, error: "Missing 'action' (reset|begin|poll)" });
-  }
+  if (!action) return res.status(400).json({ ok: false, error: "Missing 'action' (reset|begin|poll)" });
 
   try {
     const bearer = readBearer(req);
@@ -35,10 +27,12 @@ export default async function handler(req, res) {
     if (action === "reset") {
       const out = await resetDeviceFlow({ bearer });
       return res.status(200).json({ ok: true, step: "reset", ...out });
-    } else if (action === "begin") {
+    }
+    if (action === "begin") {
       const out = await beginDeviceFlow({ bearer });
       return res.status(200).json({ ok: true, step: "begin", ...out });
-    } else if (action === "poll") {
+    }
+    if (action === "poll") {
       const out = await pollDeviceFlow({ bearer });
       return res.status(200).json(out);
     }
