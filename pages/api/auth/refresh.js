@@ -1,24 +1,31 @@
 // pages/api/auth/refresh.js
-// Manual refresh endpoint. Useful for tests or when you want to “prime” the server.
+import { refreshAccessToken, readCookie } from '@/lib/auth';
 
-import { refreshAccessToken } from "@/lib/auth";
+function setTokenCookies(res, tokens) {
+  const opts = [
+    'Path=/',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax',
+    'Max-Age=7200',
+  ];
+  const cookies = [];
+  if (tokens.access_token) cookies.push(`access_token=${encodeURIComponent(tokens.access_token)}; ${opts.join('; ')}`);
+  if (tokens.refresh_token) cookies.push(`refresh_token=${encodeURIComponent(tokens.refresh_token)}; ${opts.join('; ')}`);
+  if (tokens.id_token) cookies.push(`id_token=${encodeURIComponent(tokens.id_token)}; ${opts.join('; ')}`);
+  if (cookies.length) res.setHeader('Set-Cookie', cookies);
+}
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
   try {
-    const fresh = await refreshAccessToken();
+    // prefer cookie; allow header fallback
+    const rt = readCookie(req, 'refresh_token') || (req.headers['x-refresh-token'] || '');
+    if (!rt) return res.status(400).json({ ok: false, error: 'No refresh_token' });
 
-    // Optional: set a session cookie for convenience in your browser
-    // (server does NOT rely on this; everything uses refresh when needed)
-    res.setHeader(
-      "Set-Cookie",
-      `access_token=${encodeURIComponent(fresh.access_token)}; Path=/; Secure; SameSite=Lax; HttpOnly`
-    );
-
-    return res.status(200).json({ ok: true, access_token: "set (cookie)", expires_in: fresh.expires_in });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: String(err.message || err) });
+    const tokens = await refreshAccessToken(rt);
+    setTokenCookies(res, tokens);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    res.status(401).json({ ok: false, error: String(e.message || e) });
   }
 }
