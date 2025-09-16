@@ -1,189 +1,73 @@
 // pages/api/graph/sections-create-batch.js
-// Creates your OneNote section skeleton, sanitizing names for Graph.
-// Usage:
-//   /api/graph/sections-create-batch?notebookId=YOUR_NOTEBOOK_ID
-//
-// Returns { created[], skipped[], nameMap[] }
 
-const GRAPH = "https://graph.microsoft.com/v1.0";
+import { getAccessToken } from '@/lib/auth';
 
-function send(res, code, data) {
-  res.status(code).setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(data, null, 2));
+async function resolveToken(req, res) {
+  const auth = req.headers?.authorization || '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m && m[1]) return m[1];
+  const t = await getAccessToken(req, res);
+  return t || null;
 }
 
-function getAccessTokenFromCookie(req) {
-  const hdr = req.headers.cookie || "";
-  const map = Object.fromEntries(
-    hdr.split(";").map(s => s.trim()).filter(Boolean).map(pair => {
-      const i = pair.indexOf("=");
-      return i === -1 ? [pair, ""] : [pair.slice(0, i), decodeURIComponent(pair.slice(i + 1))];
-    })
-  );
-  return map["access_token"] || null;
-}
-
-async function g(token, url, init = {}) {
-  const res = await fetch(url, {
-    ...init,
-    headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json", ...(init.headers || {}) }
+async function graphGET(path, token) {
+  const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { Authorization: `Bearer ${token}` }
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Graph ${res.status} ${url} -> ${txt}`);
-  }
-  return res;
+  if (!r.ok) throw new Error(`graphGET ${path} -> ${r.status}: ${await r.text().catch(()=> '')}`);
+  return r.json();
 }
 
-async function gjson(token, url, init = {}) {
-  const r = await g(token, url, init);
-  return r.status === 204 ? {} : r.json();
-}
-
-// Paged fetch helper (handles @odata.nextLink)
-async function gcollect(token, firstUrl) {
-  let url = firstUrl;
-  const all = [];
-  while (url) {
-    const data = await gjson(token, url);
-    if (Array.isArray(data.value)) all.push(...data.value);
-    url = data["@odata.nextLink"] || null;
-  }
-  return all;
-}
-
-// Sanitize section names for OneNote (Graph error 20153)
-/*
-Forbidden chars per Graph error:
-  ? * \ / : < > | & # ' % ~
-We also normalize:
-  "&" -> "and"
-  "/" -> " - "
-*/
-function sanitizeName(name) {
-  let out = name.replace(/&/g, "and").replace(/\//g, " - ");
-  // remove the rest of forbidden chars
-  out = out.replace(/[?*\\/:<>|&#'%~]/g, "");
-  // collapse spaces, trim
-  out = out.replace(/\s+/g, " ").trim();
-  // guard against empty result
-  if (!out) out = "Untitled";
-  return out;
+async function graphPOST(path, body, token) {
+  const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error(`graphPOST ${path} -> ${r.status}: ${await r.text().catch(()=> '')}`);
+  return r.json();
 }
 
 export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
   try {
-    const token = getAccessTokenFromCookie(req);
-    if (!token) return send(res, 401, { error: "No access_token cookie" });
+    const token = await resolveToken(req, res);
+    if (!token) return res.status(401).json({ error: 'No access token' });
 
-    const notebookId = String(req.query.notebookId || "").trim();
-    if (!notebookId) return send(res, 400, { error: "Missing notebookId" });
+    const { notebookName, notebookId, sectionNames = [] } = req.body || {};
+    if ((!notebookName && !notebookId) || !Array.isArray(sectionNames) || sectionNames.length === 0) {
+      return res.status(400).json({ error: 'notebookName or notebookId, and sectionNames[] are required' });
+    }
 
-    // Desired skeleton (human-friendly labels).
-    // NOTE: We'll sanitize before creation.
-    const desired = [
-      // Journal & Inbox
-      "Journal",
-      "Inbox",
-
-      // Food & Nutrition
-      "Food & Nutrition",
-      "Food & Nutrition / Meals",
-      "Food & Nutrition / Ingredients",
-      "Food & Nutrition / Alcohol Notes",
-
-      // Fitness
-      "Fitness",
-      "Fitness / Workouts",
-      "Fitness / Progress",
-      "Fitness / Step Counts",
-
-      // Story & Creative
-      "Story & Creative",
-      "Story & Creative / Time Wound Saga",
-      "Story & Creative / Ideas",
-      "Story & Creative / Scenes",
-
-      // Finance & Career
-      "Finance & Career",
-      "Finance & Career / Options Trading",
-      "Finance & Career / Planning",
-
-      // Lifestyle & Wardrobe
-      "Lifestyle & Wardrobe",
-      "Lifestyle & Wardrobe / Closet & Outfits",
-      "Lifestyle & Wardrobe / Shopping List",
-
-      // Archive
-      "Archive"
-    ];
-
-    // Fetch existing sections (sanitized comparison)
-    const sectionsUrl = `${GRAPH}/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections?$select=id,displayName&$top=100`;
-    const existing = await gcollect(token, sectionsUrl);
-    const existingSanitized = new Map(); // sanitizedName -> { id, displayName }
-    for (const s of existing) {
-      existingSanitized.set(sanitizeName(s.displayName || ""), { id: s.id, displayName: s.displayName });
+    let nbId = notebookId;
+    if (!nbId) {
+      const nbRes = await graphGET(`/me/onenote/notebooks?$select=id,displayName`, token);
+      const notebooks = nbRes.value || nbRes.notebooks || [];
+      const nb = notebooks.find(
+        (n) => (n.displayName || n.name || '').toLowerCase() === String(notebookName || '').toLowerCase()
+      );
+      if (!nb) return res.status(404).json({ error: `Notebook not found: ${notebookName}` });
+      nbId = nb.id;
     }
 
     const created = [];
-    const skipped = [];
-    const nameMap = []; // { desired, createdName }
-
-    // Track used sanitized names to avoid collisions within this run
-    const usedSanitized = new Set(existingSanitized.keys());
-
-    for (const rawName of desired) {
-      let san = sanitizeName(rawName);
-
-      // If sanitized collides, append a suffix
-      let attempt = san;
-      let n = 2;
-      while (usedSanitized.has(attempt.toLowerCase())) {
-        // If exact display already exists with same semantics, treat as skipped
-        const existingEntry = existingSanitized.get(attempt) || existingSanitized.get(attempt.toLowerCase());
-        if (existingEntry) {
-          skipped.push(existingEntry.displayName || attempt);
-          nameMap.push({ desired: rawName, createdName: existingEntry.displayName || attempt, reason: "already-exists" });
-          attempt = null;
-          break;
-        }
-        attempt = `${san} ${n++}`;
-      }
-      if (attempt === null) continue;
-
-      san = attempt;
-      // If a matching (sanitized) already exists from earlier not caught above, skip
-      if (existingSanitized.has(san) || existingSanitized.has(san.toLowerCase())) {
-        skipped.push(san);
-        nameMap.push({ desired: rawName, createdName: san, reason: "already-exists" });
+    for (const name of sectionNames) {
+      // Try existing
+      const secRes = await graphGET(`/me/onenote/notebooks/${nbId}/sections?$select=id,displayName`, token);
+      const secs = secRes.value || secRes.sections || [];
+      const existing = secs.find((s) => (s.displayName || s.name || '').toLowerCase() === String(name).toLowerCase());
+      if (existing) {
+        created.push({ name, id: existing.id, existed: true });
         continue;
       }
-
-      // Create
-      const createdSection = await gjson(
-        token,
-        `${GRAPH}/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ displayName: san })
-        }
-      );
-      created.push({ name: san, id: createdSection.id });
-      usedSanitized.add(san.toLowerCase());
-      nameMap.push({ desired: rawName, createdName: san, id: createdSection.id, reason: "created" });
+      const newSec = await graphPOST(`/me/onenote/notebooks/${nbId}/sections`, { displayName: name }, token);
+      created.push({ name, id: newSec?.id || null, existed: false });
     }
 
-    return send(res, 200, {
-      notebookId,
-      createdCount: created.length,
-      skippedCount: skipped.length,
-      created,
-      skipped,
-      nameMap
-    });
+    return res.status(200).json({ ok: true, notebookId: nbId, created });
   } catch (err) {
-    return send(res, 500, { error: String(err && err.message || err) });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
