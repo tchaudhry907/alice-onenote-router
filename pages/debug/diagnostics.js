@@ -9,7 +9,7 @@ export default function Diagnostics() {
   const [createResult, setCreateResult] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
   const [cleanupResult, setCleanupResult] = useState(null);
-  const [foodResult, setFoodResult] = useState(null);
+  const [sampleFoodResult, setSampleFoodResult] = useState(null);
 
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -134,19 +134,20 @@ export default function Diagnostics() {
   }
 
   async function createSampleFoodNote() {
-    setFoodResult({ loading: true });
-    const r = await fetch("/api/notes/ingest", {
+    setSampleFoodResult({ loading: true });
+    const r = await fetch("/api/graph/create-read-link", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({
-        kind: "food",
-        name: "Pumpkin pie",
-        calories: 300,
+        notebookName: "AliceChatGPT",
+        sectionName: "Food",
+        title: "[FOOD] Sample entry — apple 95 kcal",
+        html: "<p>Sample Food log created from Diagnostics 🍎</p>",
       }),
     });
     const j = await r.json();
-    setFoodResult(j);
+    setSampleFoodResult(j);
   }
 
   return (
@@ -168,17 +169,10 @@ export default function Diagnostics() {
         <a className="btn" href="/api/debug/clear-cookies">Clear Session Cookies</a>
         <a className="btn" href="/">Logout (App)</a>
         <button className="btn" onClick={reloadTokens}>Reload Tokens</button>
-        <a
-          className="btn"
-          href="/api/debug/tokens?full=1"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open /api/debug/tokens?full=1
-        </a>
+        <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">Open /api/debug/tokens?full=1</a>
       </div>
 
-      <Section title={`Tokens (${wantFull ? "full" : "masked"})`}>
+      <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
         <pre style={{ whiteSpace: "pre-wrap" }}>
           {tokens?.access_token
             ? `access_token length: ${tokens.access_token.length} · starts with:\n${tokens.access_token.slice(
@@ -188,36 +182,18 @@ export default function Diagnostics() {
             : ""}
           {JSON.stringify(tokens, null, 2)}
         </pre>
-        {tokens?.exp && (
-          <div style={{ marginTop: 8 }}>
-            Token age: {tokenAgeBadge(tokens.exp)}
-          </div>
-        )}
+        <TokenAge tokens={tokens} />
       </Section>
 
       <h3 style={{ marginTop: 18 }}>Quick Actions</h3>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "8px 0" }}>
-        <button className="btn" onClick={copyAuthHeader}>
-          Copy Authorization header
-        </button>
-        <button className="btn" onClick={seedServerWithTokens}>
-          Seed server with tokens
-        </button>
-        <button className="btn" onClick={callGraphMe}>
-          Call Graph /me (server)
-        </button>
-        <button className="btn" onClick={createTestPage}>
-          Create test page in Hobbies
-        </button>
-        <button className="btn" onClick={batchCreateSections}>
-          Batch create sections
-        </button>
-        <button className="btn" onClick={sweepTestNotes}>
-          Sweep test notes → Recycle Bin
-        </button>
-        <button className="btn" onClick={createSampleFoodNote}>
-          Create sample Food note
-        </button>
+        <button className="btn" onClick={copyAuthHeader}>Copy Authorization header</button>
+        <button className="btn" onClick={seedServerWithTokens}>Seed server with tokens</button>
+        <button className="btn" onClick={callGraphMe}>Call Graph /me (server)</button>
+        <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
+        <button className="btn" onClick={batchCreateSections}>Batch create sections</button>
+        <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
+        <button className="btn" onClick={createSampleFoodNote}>Create sample Food note</button>
       </div>
 
       <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
@@ -225,7 +201,7 @@ export default function Diagnostics() {
       <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
       <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
       <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
-      <Section title="Sample Food Log Result"><pre>{fmt(foodResult)}</pre></Section>
+      <Section title="Sample Food Log Result"><pre>{fmt(sampleFoodResult)}</pre></Section>
 
       <style jsx>{`
         .btn {
@@ -243,11 +219,10 @@ export default function Diagnostics() {
         }
         .badge {
           display: inline-block;
+          margin-right: 8px;
           padding: 2px 6px;
-          border-radius: 6px;
+          border-radius: 4px;
           font-size: 12px;
-          border: 1px solid #ddd;
-          color: #111;
         }
       `}</style>
     </main>
@@ -283,26 +258,33 @@ function fmt(x) {
   }
 }
 
-// FIXED version of tokenAgeBadge with safe text
-function tokenAgeBadge(exp) {
-  const secs = Math.floor(exp - Date.now() / 1000);
-  if (secs <= 0) {
-    return (
-      <span className="badge" style={{ background: "#ffdddd" }}>
-        ID token expired
-      </span>
-    );
-  }
-  if (secs < 1800) {
-    return (
-      <span className="badge" style={{ background: "#fff3cd" }}>
-        {"ID token < 30m"}
-      </span>
-    );
-  }
+function TokenAge({ tokens }) {
+  if (!tokens) return null;
+
+  const render = (tok, label) => {
+    if (!tok) return null;
+    try {
+      const [, payload] = tok.split(".");
+      if (!payload) return null;
+      const parsed = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+      const exp = parsed.exp ? parsed.exp * 1000 : null;
+      if (!exp) return null;
+      const secs = Math.floor((exp - Date.now()) / 1000);
+      if (secs <= 0)
+        return <span className="badge" style={{ background: "#ffdddd" }}>{label} expired</span>;
+      if (secs < 1800)
+        return <span className="badge" style={{ background: "#fff3cd" }}>{label} &lt; 30m</span>;
+      return <span className="badge" style={{ background: "#d1e7dd" }}>{label} healthy</span>;
+    } catch {
+      return null;
+    }
+  };
+
   return (
-    <span className="badge" style={{ background: "#d1e7dd" }}>
-      ID token healthy
-    </span>
+    <div style={{ marginTop: 6 }}>
+      {render(tokens.access_token, "Access token")}
+      {render(tokens.refresh_token, "Refresh token")}
+      {render(tokens.id_token, "ID token")}
+    </div>
   );
 }
