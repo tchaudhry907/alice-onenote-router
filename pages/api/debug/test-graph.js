@@ -1,16 +1,14 @@
-import { getAccessToken, requireAuth } from "@/lib/auth";
+// pages/api/debug/test-graph.js
+import { getBearerFromReq, graphGET } from "@/lib/auth";
 
-export default requireAuth(async function handler(req, res, session) {
+export default async function handler(req, res) {
   try {
-    const token = await getAccessToken(session);
+    const bearer = getBearerFromReq(req);
+    if (!bearer) return res.status(401).json({ ok: false, error: "No access token" });
 
-    const r = await fetch("https://graph.microsoft.com/v1.0/me", {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-
-    const data = await r.json();
-    res.status(200).json({ ok: true, graph: data });
-  } catch (err) {
-    res.status(400).json({ ok: false, error: err.message });
+    const me = await graphGET("https://graph.microsoft.com/v1.0/me", bearer);
+    return res.status(200).json(me);
+  } catch (e) {
+    return res.status(200).json({ ok: false, error: String(e.message || e) });
   }
-});
+}
