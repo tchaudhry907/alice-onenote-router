@@ -7,8 +7,8 @@ export default function Diagnostics() {
   const [seedResult, setSeedResult] = useState(null);
   const [meResult, setMeResult] = useState(null);
   const [createResult, setCreateResult] = useState(null);
-  const [sweepResult, setSweepResult] = useState(null);
-  const [emptyResult, setEmptyResult] = useState(null);
+  const [batchResult, setBatchResult] = useState(null);
+  const [cleanupResult, setCleanupResult] = useState(null);
 
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -32,7 +32,6 @@ export default function Diagnostics() {
       setStatus("Failed to load tokens");
     }
   }
-
   useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
 
   async function copyAuthHeader() {
@@ -44,26 +43,28 @@ export default function Diagnostics() {
 
   async function seedServerWithTokens() {
     if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
-      alert("Need access_token, refresh_token, and id_token. Click 'Refresh Tokens' then 'Reload Tokens' first.");
+      alert("Need access_token + refresh_token + id_token. Click ‘Refresh Tokens’, then ‘Reload Tokens’, then try again.");
       return;
     }
     const r = await fetch("/api/debug/tokens/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "include",
       body: JSON.stringify({
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         id_token: tokens.id_token,
       }),
+      credentials: "include",
     });
-    setSeedResult(await r.json());
+    const j = await r.json();
+    setSeedResult(j);
     await reloadTokens();
   }
 
   async function callGraphMe() {
     const r = await fetch("/api/graph/me", { credentials: "include" });
-    setMeResult(await r.json());
+    const j = await r.json();
+    setMeResult(j);
   }
 
   async function createTestPage() {
@@ -79,34 +80,42 @@ export default function Diagnostics() {
         html: "<p>Created via Diagnostics button ✅</p>",
       }),
     });
-    setCreateResult(await r.json());
+    const j = await r.json();
+    setCreateResult(j);
   }
 
-  async function sweepToBin() {
-    setSweepResult({ loading: true });
-    const r = await fetch("/api/onenote/sweep-to-bin", {
+  async function batchCreateSections() {
+    setBatchResult({ loading: true });
+    const r = await fetch("/api/graph/sections-create-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({
         notebookName: "AliceChatGPT",
-        titlePrefixes: ["[DIAG]", "[WORKOUT]", "[HOBBY]", "[INBOX] quick note", "[STEPS]"],
-        recycleSectionName: "🗑 Recycle Bin"
-      })
+        sectionNames: [
+          "Inbox",
+          "Food",
+          "Fitness - Workouts",
+          "Fitness - Step Counts",
+          "Hobbies",
+          "Travel",
+          "Taxes",
+          "Recycle Bin"
+        ],
+      }),
     });
-    setSweepResult(await r.json());
+    const j = await r.json();
+    setBatchResult(j);
   }
 
-  async function emptyBin() {
-    if (!confirm("Permanently delete everything in 🗑 Recycle Bin? This cannot be undone.")) return;
-    setEmptyResult({ loading: true });
-    const r = await fetch("/api/onenote/empty-bin", {
+  async function sweepTestNotes() {
+    setCleanupResult({ loading: true });
+    const r = await fetch("/api/graph/cleanup-tests", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ notebookName: "AliceChatGPT", recycleSectionName: "🗑 Recycle Bin" })
     });
-    setEmptyResult(await r.json());
+    const j = await r.json();
+    setCleanupResult(j);
   }
 
   return (
@@ -137,25 +146,15 @@ export default function Diagnostics() {
         <button className="btn" onClick={seedServerWithTokens}>Seed server with tokens</button>
         <button className="btn" onClick={callGraphMe}>Call Graph /me (server)</button>
         <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
-        <button className="btn" onClick={sweepToBin}>Sweep test notes → Recycle Bin</button>
-        <button className="btn" onClick={emptyBin}>Empty Recycle Bin</button>
+        <button className="btn" onClick={batchCreateSections}>Batch create sections</button>
+        <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
       </div>
 
-      <Section title="Seed Result">
-        <pre>{seedResult ? JSON.stringify(seedResult, null, 2) : "—"}</pre>
-      </Section>
-      <Section title="Graph /me Result">
-        <pre>{meResult ? JSON.stringify(meResult, null, 2) : "—"}</pre>
-      </Section>
-      <Section title="Create Test Page Result">
-        <pre>{createResult ? JSON.stringify(createResult, null, 2) : "—"}</pre>
-      </Section>
-      <Section title="Sweep Result">
-        <pre>{sweepResult ? JSON.stringify(sweepResult, null, 2) : "—"}</pre>
-      </Section>
-      <Section title="Empty Bin Result">
-        <pre>{emptyResult ? JSON.stringify(emptyResult, null, 2) : "—"}</pre>
-      </Section>
+      <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
+      <Section title="Graph /me Result"><pre>{fmt(meResult)}</pre></Section>
+      <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
+      <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
+      <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
 
       <style jsx>{`
         .btn {
@@ -183,4 +182,10 @@ function Section({ title, children }) {
       </div>
     </section>
   );
+}
+
+function fmt(x) {
+  if (!x) return "—";
+  if (x.loading) return "Loading…";
+  try { return JSON.stringify(x, null, 2); } catch { return String(x); }
 }
