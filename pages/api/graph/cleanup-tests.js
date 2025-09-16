@@ -1,61 +1,76 @@
 // pages/api/graph/cleanup-tests.js
-import { getBearerFromReq, graphGET, graphDELETE } from "@/lib/auth";
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Use POST" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Use POST" });
+  }
+
+  const bearer =
+    req.headers.authorization ||
+    (req.cookies?.access_token ? `Bearer ${req.cookies.access_token}` : "");
+
+  if (!bearer) {
+    return res.status(401).json({ ok: false, error: "No access token (header or cookie)" });
+  }
+
+  const matchesTestTitle = (title = "") => {
+    const t = String(title).toLowerCase();
+    return (
+      /^\[diag\]/i.test(title) ||
+      t.includes("diagnostics") ||
+      t.includes("test page")
+    );
+  };
+
+  let scanned = 0;
+  let deleted = 0;
+  let kept = 0;
+  const deletedIds = [];
+  const keptSamples = [];
 
   try {
-    const bearer = getBearerFromReq(req);
-    if (!bearer) return res.status(401).json({ ok: false, error: "No access token (header or cookie)" });
+    let url = "https://graph.microsoft.com/v1.0/me/onenote/pages?$select=id,title,createdDateTime&$top=100";
+    let guard = 0; // safety to avoid infinite loops
 
-    // configurable via body if you want
-    const {
-      notebookName = "AliceChatGPT",
-      maxPages = 200,
-      titlePrefixes = ["[DIAG]", "[WORKOUT]", "[HOBBY]", "[STEPS]", "[INBOX] quick note"],
-    } = req.body || {};
-
-    // find notebook (so we can optionally limit by it later if needed)
-    const nbs = await graphGET("https://graph.microsoft.com/v1.0/me/onenote/notebooks?$select=id,displayName", bearer);
-    const notebook = (nbs.value || []).find(n => (n.displayName || "").trim().toLowerCase() === notebookName.toLowerCase());
-    if (!notebook) return res.status(404).json({ ok: false, error: `Notebook not found: ${notebookName}` });
-
-    // Get recent pages (largest allowed page is fine; we filter client-side)
-    // NOTE: orderby createdDateTime desc is supported; keep it simple and robust.
-    const pages = await graphGET(
-      `https://graph.microsoft.com/v1.0/me/onenote/pages?$top=${encodeURIComponent(maxPages)}&$orderby=createdDateTime desc`,
-      bearer
-    );
-
-    const isTestTitle = (t = "") => titlePrefixes.some(p => (t || "").startsWith(p));
-
-    // Keep only pages within our notebook (parsing parentSection/notebook if present)
-    const candidates = (pages.value || []).filter(p => {
-      const title = p.title || "";
-      if (!isTestTitle(title)) return false;
-      // Prefer matching parentNotebook id if available; otherwise keep it (still safe cleanup).
-      const nb = p.parentNotebook || {};
-      return !nb.id || String(nb.id).includes(notebook.id) || String(notebook.id).includes(nb.id);
-    });
-
-    const deleted = [];
-    const failed = [];
-
-    for (const pg of candidates) {
-      try {
-        await graphDELETE(`https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(pg.id)}`, bearer);
-        deleted.push({ id: pg.id, title: pg.title });
-      } catch (err) {
-        failed.push({ id: pg.id, title: pg.title, error: String(err.message || err) });
+    while (url && guard++ < 200) {
+      const r = await fetch(url, { headers: { Authorization: bearer } });
+      const j = await r.json();
+      if (!r.ok) {
+        return res
+          .status(200)
+          .json({ ok: false, error: `graph GET pages -> ${r.status}: ${JSON.stringify(j)}` });
       }
+
+      const rows = Array.isArray(j.value) ? j.value : [];
+      for (const p of rows) {
+        scanned++;
+        if (matchesTestTitle(p.title)) {
+          const del = await fetch(
+            `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(p.id)}`,
+            { method: "DELETE", headers: { Authorization: bearer } }
+          );
+          if (del.status === 204) {
+            deleted++;
+            deletedIds.push(p.id);
+          } else {
+            // if delete fails, keep record but don’t fail whole sweep
+            kept++;
+            keptSamples.push({ id: p.id, title: p.title, deleteStatus: del.status });
+          }
+        } else {
+          kept++;
+          if (keptSamples.length < 10) keptSamples.push({ id: p.id, title: p.title });
+        }
+      }
+
+      url = j["@odata.nextLink"] || null;
     }
 
     return res.status(200).json({
       ok: true,
-      scanned: (pages.value || []).length,
-      considered: candidates.length,
+      scanned,
       deleted,
-      failed,
+      kept,
+      deletedIds,
     });
   } catch (e) {
     return res.status(200).json({ ok: false, error: String(e.message || e) });
