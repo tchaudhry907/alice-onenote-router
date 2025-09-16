@@ -9,14 +9,13 @@ export default function Diagnostics() {
   const [createResult, setCreateResult] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
   const [cleanupResult, setCleanupResult] = useState(null);
-  const [emptyRbResult, setEmptyRbResult] = useState(null);
-  const [foodResult, setFoodResult] = useState(null);
+  const [foodSampleResult, setFoodSampleResult] = useState(null);
+  const [tokenHealth, setTokenHealth] = useState(null);
 
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
     return `${window.location.protocol}//${window.location.host}`;
   }, []);
-
   const wantFull = useMemo(() => {
     if (typeof window === "undefined") return false;
     const p = new URLSearchParams(window.location.search);
@@ -25,16 +24,14 @@ export default function Diagnostics() {
 
   async function reloadTokens() {
     if (!baseUrl) return;
-    try {
-      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, { credentials: "include" }).then(r => r.json());
-      setTokens(j);
-      const hasAny = !!(j?.access_token || j?.refresh_token || j?.id_token);
-      setStatus(hasAny ? "Tokens present" : "No tokens captured yet");
-    } catch {
-      setStatus("Failed to load tokens");
-    }
+    const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, { credentials: "include" }).then(r => r.json());
+    setTokens(j);
+    const hasAny = !!(j?.access_token || j?.refresh_token || j?.id_token);
+    setStatus(hasAny ? "Tokens present" : "No tokens captured yet");
+    const th = await fetch("/api/debug/token-age", { credentials: "include" }).then(r => r.json()).catch(() => null);
+    setTokenHealth(th || null);
   }
-  useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
+  useEffect(() => { reloadTokens().catch(()=>{}); }, [baseUrl, wantFull]);
 
   async function copyAuthHeader() {
     if (!tokens?.access_token) { alert("No access_token in memory."); return; }
@@ -95,14 +92,8 @@ export default function Diagnostics() {
       body: JSON.stringify({
         notebookName: "AliceChatGPT",
         sectionNames: [
-          "Inbox",
-          "Food",
-          "Fitness - Workouts",
-          "Fitness - Step Counts",
-          "Hobbies",
-          "Travel",
-          "Taxes",
-          "Recycle Bin",
+          "Inbox","Food","Fitness - Workouts","Fitness - Step Counts",
+          "Hobbies","Travel","Taxes","Recycle Bin"
         ],
       }),
     });
@@ -117,33 +108,23 @@ export default function Diagnostics() {
     setCleanupResult(j);
   }
 
-  async function emptyRecycleBin() {
-    setEmptyRbResult({ loading: true });
-    const r = await fetch("/api/graph/empty-recycle-bin", { method: "POST", credentials: "include" });
-    const j = await r.json();
-    setEmptyRbResult(j);
-  }
-
-  async function createSampleFood() {
-    setFoodResult({ loading: true });
-    const r = await fetch("/api/graph/food-log", {
+  async function sampleFoodNote() {
+    const r = await fetch("/api/notes/food", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({
-        item: "Pumpkin pie",
-        calories: 300,
-        note: "sample via Diagnostics",
-      }),
+      body: JSON.stringify({ name: "Pumpkin pie", calories: 300 }),
     });
     const j = await r.json();
-    setFoodResult(j);
+    setFoodSampleResult(j);
   }
+
+  const badge = renderBadge(tokenHealth);
 
   return (
     <main style={{ padding: 24, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
       <h1>Alice OneNote Router — Diagnostics</h1>
-      <p>Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong></p>
+      <p>Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong> {badge}</p>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0" }}>
         <a className="btn" href="/api/auth/logout">Hard Reset + Logout</a>
@@ -154,6 +135,10 @@ export default function Diagnostics() {
         <button className="btn" onClick={reloadTokens}>Reload Tokens</button>
         <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">Open /api/debug/tokens?full=1</a>
       </div>
+
+      <Section title={`Token Health`}>
+        <pre>{fmt(tokenHealth)}</pre>
+      </Section>
 
       <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
         <pre style={{ whiteSpace: "pre-wrap" }}>
@@ -170,8 +155,7 @@ export default function Diagnostics() {
         <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
         <button className="btn" onClick={batchCreateSections}>Batch create sections</button>
         <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
-        <button className="btn" onClick={emptyRecycleBin}>Empty Recycle Bin (section)</button>
-        <button className="btn" onClick={createSampleFood}>Create sample Food note</button>
+        <button className="btn" onClick={sampleFoodNote}>Create sample Food note</button>
       </div>
 
       <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
@@ -179,21 +163,13 @@ export default function Diagnostics() {
       <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
       <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
       <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
-      <Section title="Empty Recycle Bin Result"><pre>{fmt(emptyRbResult)}</pre></Section>
-      <Section title="Sample Food Log Result"><pre>{fmt(foodResult)}</pre></Section>
+      <Section title="Sample Food Log Result"><pre>{fmt(foodSampleResult)}</pre></Section>
 
       <style jsx>{`
-        .btn {
-          display: inline-block;
-          padding: 6px 10px;
-          border: 1px solid #ddd;
-          border-radius: 6px;
-          text-decoration: none;
-          color: #111;
-          background: #f7f7f9;
-          cursor: pointer;
-        }
-        .btn:hover { background: #eee; }
+        .btn { display:inline-block; padding:6px 10px; border:1px solid #ddd; border-radius:6px;
+               text-decoration:none; color:#111; background:#f7f7f9; cursor:pointer; }
+        .btn:hover { background:#eee; }
+        .badge { padding:2px 6px; border-radius:999px; font-size:12px; margin-left:8px; }
       `}</style>
     </main>
   );
@@ -209,4 +185,16 @@ function Section({ title, children }) {
     </section>
   );
 }
+
 function fmt(x) { if (!x) return "—"; if (x.loading) return "Loading…"; try { return JSON.stringify(x, null, 2); } catch { return String(x); } }
+
+function renderBadge(th) {
+  if (!th?.ok) return null;
+  const secs = th?.id_token?.seconds_until_expiry;
+  if (!secs && th?.access_token?.type === "opaque") {
+    return <span className="badge" style={{ background:"#eee" }}>ID token exp: unknown</span>;
+  }
+  if (secs <= 0) return <span className="badge" style={{ background:"#ffdddd" }}>ID token expired</span>;
+  if (secs < 1800) return <span className="badge" style={{ background:"#fff3cd" }}>ID token < 30m</span>;
+  return <span className="badge" style={{ background:"#d1e7dd" }}>ID token healthy</span>;
+}
