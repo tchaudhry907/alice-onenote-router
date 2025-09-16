@@ -1,78 +1,54 @@
 // pages/api/graph/cleanup-tests.js
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Use POST" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Use POST" });
 
   const bearer =
     req.headers.authorization ||
     (req.cookies?.access_token ? `Bearer ${req.cookies.access_token}` : "");
+  if (!bearer) return res.status(401).json({ ok: false, error: "No access token (header or cookie)" });
 
-  if (!bearer) {
-    return res.status(401).json({ ok: false, error: "No access token (header or cookie)" });
-  }
-
-  const matchesTestTitle = (title = "") => {
-    const t = String(title).toLowerCase();
-    return (
-      /^\[diag\]/i.test(title) ||
-      t.includes("diagnostics") ||
-      t.includes("test page")
-    );
-  };
-
-  let scanned = 0;
-  let deleted = 0;
-  let kept = 0;
-  const deletedIds = [];
-  const keptSamples = [];
+  const prefixes = ["[DIAG]", "[WORKOUT]", "[HOBBY]", "[STEPS]"];
+  const deleted = [];
+  const errors = [];
 
   try {
-    let url = "https://graph.microsoft.com/v1.0/me/onenote/pages?$select=id,title,createdDateTime&$top=100";
-    let guard = 0; // safety to avoid infinite loops
+    let url = "https://graph.microsoft.com/v1.0/me/onenote/pages?$top=50";
+    // Use delta paging via @odata.nextLink when present
+    while (url) {
+      const resp = await fetch(url, { headers: { Authorization: bearer } });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(`graph GET pages -> ${resp.status}: ${JSON.stringify(data)}`);
 
-    while (url && guard++ < 200) {
-      const r = await fetch(url, { headers: { Authorization: bearer } });
-      const j = await r.json();
-      if (!r.ok) {
-        return res
-          .status(200)
-          .json({ ok: false, error: `graph GET pages -> ${r.status}: ${JSON.stringify(j)}` });
-      }
+      const items = data.value || [];
+      // Filter by title prefixes
+      const candidates = items.filter(p => {
+        const t = (p.title || "").trim();
+        return prefixes.some(pref => t.startsWith(pref));
+      });
 
-      const rows = Array.isArray(j.value) ? j.value : [];
-      for (const p of rows) {
-        scanned++;
-        if (matchesTestTitle(p.title)) {
-          const del = await fetch(
-            `https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(p.id)}`,
-            { method: "DELETE", headers: { Authorization: bearer } }
-          );
-          if (del.status === 204) {
-            deleted++;
-            deletedIds.push(p.id);
-          } else {
-            // if delete fails, keep record but don’t fail whole sweep
-            kept++;
-            keptSamples.push({ id: p.id, title: p.title, deleteStatus: del.status });
-          }
+      // Delete each candidate
+      for (const p of candidates) {
+        const del = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/pages/${encodeURIComponent(p.id)}`, {
+          method: "DELETE",
+          headers: { Authorization: bearer },
+        });
+        if (del.status === 204) {
+          deleted.push({ id: p.id, title: p.title });
         } else {
-          kept++;
-          if (keptSamples.length < 10) keptSamples.push({ id: p.id, title: p.title });
+          const j = await safeJson(del);
+          errors.push({ id: p.id, title: p.title, status: del.status, error: j });
         }
       }
 
-      url = j["@odata.nextLink"] || null;
+      url = data["@odata.nextLink"] || null;
     }
 
-    return res.status(200).json({
-      ok: true,
-      scanned,
-      deleted,
-      kept,
-      deletedIds,
-    });
+    return res.status(200).json({ ok: true, deleted, errors });
   } catch (e) {
-    return res.status(200).json({ ok: false, error: String(e.message || e) });
+    return res.status(200).json({ ok: false, error: String(e.message || e), deleted, errors });
   }
+}
+
+async function safeJson(r) {
+  try { return await r.json(); } catch { return { text: await r.text() }; }
 }
