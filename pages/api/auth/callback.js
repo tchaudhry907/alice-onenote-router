@@ -1,122 +1,61 @@
 // pages/api/auth/callback.js
-import cookie from "cookie";
+// Exchange auth code -> tokens; save to KV; send back to Diagnostics
 
-/**
- * Handles the redirect back from Microsoft.
- * Exchanges the authorization code for tokens and stores them in cookies.
- *
- * Env needed:
- *   MS_CLIENT_ID
- *   MS_CLIENT_SECRET
- *   MS_TENANT
- *   APP_BASE_URL
- *   MS_SCOPES (optional)
- *   REDIRECT_URI (optional)   defaults to `${APP_BASE_URL}/api/auth/callback`
- */
+import { kvSet } from "@/lib/kv";
+
+async function postForm(url, data) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(data),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
+  return json;
+}
+
 export default async function handler(req, res) {
   try {
-    const { code, error, error_description } = req.query || {};
+    const { code, error, error_description } = req.query;
+    if (error) throw new Error(`${error}: ${error_description || ""}`);
+    if (!code) throw new Error("Missing authorization code");
 
-    if (error) {
-      return res
-        .status(400)
-        .json({ ok: false, error, error_description: error_description || "" });
-    }
-    if (!code) {
-      return res.status(400).json({ ok: false, error: "Missing code" });
-    }
+    const tenant = process.env.MS_TENANT_ID || process.env.AZURE_TENANT_ID || "common";
+    const clientId = process.env.MS_CLIENT_ID || process.env.AZURE_CLIENT_ID;
+    const clientSecret = process.env.MS_CLIENT_SECRET || process.env.AZURE_CLIENT_SECRET;
+    const redirect =
+      process.env.MS_REDIRECT_URI ||
+      `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}/api/auth/callback`;
 
-    const TENANT = process.env.MS_TENANT || "common";
-    const CLIENT_ID = process.env.MS_CLIENT_ID;
-    const CLIENT_SECRET = process.env.MS_CLIENT_SECRET;
-    const APP_BASE_URL = process.env.APP_BASE_URL;
-    const REDIRECT_URI =
-      process.env.REDIRECT_URI || `${APP_BASE_URL}/api/auth/callback`;
-    const SCOPES =
-      process.env.MS_SCOPES ||
-      "offline_access openid profile User.Read Notes.ReadWrite.All";
+    if (!clientId || !clientSecret) throw new Error("Missing MS_CLIENT_ID / MS_CLIENT_SECRET");
 
-    if (!CLIENT_ID || !CLIENT_SECRET || !APP_BASE_URL) {
-      return res.status(500).json({
-        ok: false,
-        error:
-          "Missing required env (MS_CLIENT_ID / MS_CLIENT_SECRET / APP_BASE_URL)",
-      });
-    }
-
-    const tokenEndpoint = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
-
-    const form = new URLSearchParams();
-    form.set("client_id", CLIENT_ID);
-    form.set("client_secret", CLIENT_SECRET);
-    form.set("grant_type", "authorization_code");
-    form.set("code", code);
-    form.set("redirect_uri", REDIRECT_URI);
-    form.set("scope", SCOPES);
-
-    const resp = await fetch(tokenEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: form.toString(),
+    const tokenUrl = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`;
+    const token = await postForm(tokenUrl, {
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirect,
+      scope: "openid offline_access profile https://graph.microsoft.com/.default",
     });
 
-    const data = await resp.json();
+    const { access_token, refresh_token } = token;
+    if (!access_token) throw new Error("No access_token in response");
 
-    if (!resp.ok) {
-      // Show MS error plainly so we can diagnose
-      return res.status(400).json({
-        ok: false,
-        error: data.error || "token_exchange_failed",
-        error_description: data.error_description,
-      });
-    }
+    // Save tokens in KV for the server to use
+    await kvSet("graph:access_token", access_token, { ex: 3500 });
+    await kvSet("ms:access_token", access_token, { ex: 3500 });
+    if (refresh_token) await kvSet("ms:refresh_token", refresh_token, { ex: 60 * 60 * 24 * 10 });
 
-    const {
-      access_token,
-      refresh_token,
-      id_token,
-      expires_in, // seconds
-    } = data;
-
-    if (!access_token || !refresh_token) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing tokens in callback exchange",
-        raw: data,
-      });
-    }
-
-    const setCookies = [
-      cookie.serialize("access_token", access_token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: typeof expires_in === "number" ? expires_in : 3600,
-      }),
-      cookie.serialize("refresh_token", refresh_token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: 60 * 60 * 24 * 30, // 30 days
-      }),
-      cookie.serialize("id_token", id_token || "", {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: 60 * 60 * 24,
-      }),
-    ];
-
-    res.setHeader("Set-Cookie", setCookies);
-
-    // Bounce back to diagnostics so you can see "Tokens present"
-    res.writeHead(302, { Location: `${APP_BASE_URL}/debug/diagnostics` });
+    // Back to diagnostics with a success flag
+    const diag = `/debug/diagnostics?login=ok`;
+    res.writeHead(302, { Location: diag });
     res.end();
   } catch (e) {
-    console.error("auth/callback error:", e);
-    res.status(500).json({ ok: false, error: "server_error", details: e.message });
+    const diag = `/debug/diagnostics?login=err&msg=${encodeURIComponent(e.message)}`;
+    res.writeHead(302, { Location: diag });
+    res.end();
   }
 }
