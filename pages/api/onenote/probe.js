@@ -1,5 +1,5 @@
 // pages/api/onenote/probe.js
-// Uses server-seeded tokens from KV to call Graph /me (no header paste needed)
+// Uses server-saved token from KV to call Graph /me (no header required).
 
 import { kvGet } from '@/lib/kv';
 
@@ -13,17 +13,17 @@ async function graphFetch(path, token) {
 
 export default async function handler(req, res) {
   try {
-    const candidateKeys = ['ms:access_token','graph:access_token','access_token'];
+    const keys = ['ms:access_token','graph:access_token','access_token'];
     let token = null;
-    for (const k of candidateKeys) {
+    for (const k of keys) {
       const v = await kvGet(k);
       if (typeof v === 'string' && v.includes('.')) { token = v; break; }
     }
     if (!token) {
       return res.status(400).json({
         ok: false,
-        error: 'No server token found in KV. Hit /api/onenote/seed with your Authorization header.',
-        triedKeys: candidateKeys
+        error: 'No server token found. Call /api/onenote/seed first.',
+        triedKeys: keys
       });
     }
 
