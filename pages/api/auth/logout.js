@@ -1,51 +1,50 @@
-// /pages/api/auth/logout.js
-//
-// Full, copy-paste replacement.
-// Clears all auth cookies, hits the Microsoft logout endpoint, and
-// uses post_logout_redirect_uri to return you to your app.
-// Optional: /api/auth/logout?then=login will return to a fresh login.
-//
-// Requires env:
-//   - APP_BASE_URL (e.g. https://alice-onenote-router.vercel.app)
-//   - MS_TENANT    (common or consumers; you already set this)
+// pages/api/auth/logout.js
+// Hard logout: delete server tokens and expire ALL cookies on this domain.
 
-import { serialize } from "cookie";
+import { kvDel } from '@/lib/kv';
 
-function clearCookie(name) {
-  return serialize(name, "", {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 0,
-  });
+const KV_KEYS = [
+  'graph:access_token',
+  'ms:access_token',
+  'access_token',
+  'ms:refresh_token',
+  'auth:access_token'
+];
+
+function expire(name, domain) {
+  // Expire cookie for root path; include HttpOnly/Secure to catch httpOnly cookies
+  return `${name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; ${
+    domain ? `Domain=${domain}; ` : ''
+  }Secure; HttpOnly`;
 }
 
 export default async function handler(req, res) {
-  const base =
-    (process.env.APP_BASE_URL || "").replace(/\/+$/, "") ||
-    "https://alice-onenote-router.vercel.app";
+  try {
+    // 1) Clear server-side tokens in KV
+    const deleted = {};
+    for (const k of KV_KEYS) deleted[k] = await kvDel(k);
 
-  const tenant = process.env.MS_TENANT || "common";
-  const then = (req.query?.then || "").toString(); // "" | "login"
+    // 2) Collect ALL cookies and expire them
+    const raw = req.headers.cookie || '';
+    const names = [...new Set(raw.split(';').map(s => s.trim().split('=')[0]).filter(Boolean))];
 
-  // Where to send the browser after Microsoft finishes sign-out
-  const returnPath = then === "login" ? "/api/auth/login?return=/debug/diagnostics"
-                                      : "/debug/diagnostics";
-  const postLogout = `${base}${returnPath}`;
+    // Attempt with current host as Domain as well (helps with www/app subdomain cases)
+    const host = req.headers.host || '';
+    const domain = host.includes('.') ? '.' + host.split(':')[0].split('.').slice(-2).join('.') : '';
 
-  // Clear all cookies we set anywhere in the app
-  res.setHeader("Set-Cookie", [
-    clearCookie("refresh_token"),
-    clearCookie("access_token"),
-    clearCookie("id_token"),
-    clearCookie("alice_session"),
-  ]);
+    const setCookies = [];
+    for (const n of names) {
+      setCookies.push(expire(n, ''));           // current host
+      if (domain) setCookies.push(expire(n, domain)); // parent domain
+    }
+    if (setCookies.length) res.setHeader('Set-Cookie', setCookies);
 
-  // Microsoft logout with automatic return
-  const logoutUrl =
-    `https://login.microsoftonline.com/${encodeURIComponent(tenant)}` +
-    `/oauth2/v2.0/logout?post_logout_redirect_uri=${encodeURIComponent(postLogout)}`;
-
-  return res.redirect(302, logoutUrl);
+    return res.status(200).json({
+      ok: true,
+      clearedCookies: names,
+      deletedKeys: deleted
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
 }
