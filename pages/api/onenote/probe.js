@@ -1,31 +1,49 @@
-# ===== OneNote + Graph FULL diag =====
-BASE="https://alice-onenote-router.vercel.app"
+// pages/api/onenote/probe.js
+// Uses server-seeded tokens from KV to call Graph /me (no header paste needed)
 
-# 0) Copy the Authorization header again from /debug/diagnostics (Graph) BEFORE running this
-RAW="$(pbpaste | tr -d '\r')"
-case "$RAW" in
-  Authorization:*) AUTH="$RAW" ;;
-  [Bb]earer\ *)    AUTH="Authorization: $RAW" ;;
-  *)               AUTH="Authorization: Bearer $RAW" ;;
-esac
-TOKEN="${AUTH#Authorization: Bearer }"
-case "$TOKEN" in *.*.*) echo "🔐 Using bearer (masked)";; *) echo "❌ Clipboard missing a real token"; exit 1;; esac
+import { kvGet } from '@/lib/kv';
 
-echo "➡️ endpoint probe"
-curl -i -s "$BASE/api/onenote" | sed -n '1p;/^x-matched-path:/p'
+async function graphFetch(path, token) {
+  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, statusText: res.statusText, text };
+}
 
-echo
-echo "➡️ whoami (GET via server)"
-curl -i -s "$BASE/api/onenote?act=me" -H "$AUTH"
+export default async function handler(req, res) {
+  try {
+    // Try a few likely keys for the access token (seeded by diagnostics)
+    const candidateKeys = [
+      'ms:access_token',
+      'graph:access_token',
+      'auth:access_token',
+      'access_token'
+    ];
+    let token = null;
+    for (const k of candidateKeys) {
+      const v = await kvGet(k);
+      if (v && typeof v === 'string' && v.includes('.')) { token = v; break; }
+    }
+    if (!token) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No server token found in KV. Go to /debug/diagnostics and click "Refresh Tokens" then "Seed Server with Tokens".',
+        triedKeys: candidateKeys
+      });
+    }
 
-echo
-echo "➡️ whoami (POST via server)"
-curl -i -s -X POST "$BASE/api/onenote" -H "$AUTH" -H "Content-Type: application/json" --data '{"act":"me"}'
+    const me = await graphFetch('/me', token);
+    // Shorten body to avoid huge response
+    const bodySnippet = me.text.length > 500 ? me.text.slice(0, 500) + '…' : me.text;
 
-echo
-echo "➡️ Graph /me (direct)"
-curl -i -s https://graph.microsoft.com/v1.0/me -H "$AUTH"
-
-echo
-echo "➡️ Graph notebooks (direct)"
-curl -i -s "https://graph.microsoft.com/v1.0/me/onenote/notebooks?\$select=id,displayName" -H "$AUTH"
+    return res.status(200).json({
+      ok: me.ok,
+      status: me.status,
+      statusText: me.statusText,
+      bodySnippet
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+}
