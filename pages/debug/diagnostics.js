@@ -2,7 +2,6 @@
 import { useEffect, useMemo, useState } from "react";
 
 export default function Diagnostics() {
-  // --- state ---
   const [tokens, setTokens] = useState(null);
   const [status, setStatus] = useState("No tokens captured yet");
   const [seedResult, setSeedResult] = useState(null);
@@ -10,9 +9,9 @@ export default function Diagnostics() {
   const [createResult, setCreateResult] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
   const [cleanupResult, setCleanupResult] = useState(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [foodSampleResult, setFoodSampleResult] = useState(null);
+  const [refreshResult, setRefreshResult] = useState(null);
 
-  // --- helpers ---
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
     return `${window.location.protocol}//${window.location.host}`;
@@ -27,9 +26,10 @@ export default function Diagnostics() {
   async function reloadTokens() {
     if (!baseUrl) return;
     try {
-      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, {
-        credentials: "include",
-      }).then((r) => r.json());
+      const j = await fetch(
+        `${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`,
+        { credentials: "include" }
+      ).then((r) => r.json());
       setTokens(j);
       const hasAny = !!(j?.access_token || j?.refresh_token || j?.id_token);
       setStatus(hasAny ? "Tokens present" : "No tokens captured yet");
@@ -37,20 +37,24 @@ export default function Diagnostics() {
       setStatus("Failed to load tokens");
     }
   }
-
   useEffect(() => {
     reloadTokens();
   }, [baseUrl, wantFull]);
 
-  // --- quick actions ---
-  async function refreshTokensInPlace() {
-    setIsRefreshing(true);
+  // ---- Buttons (no navigation) ----
+  async function doRefreshTokens() {
+    setRefreshResult({ loading: true });
     try {
-      // This hits /api/auth/refresh but stays on the same page
-      await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
+      const j = await fetch("/api/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      }).then((r) => r.json());
+      setRefreshResult(j);
       await reloadTokens();
-    } finally {
-      setIsRefreshing(false);
+      alert("Tokens refreshed (no page navigation).");
+    } catch (e) {
+      setRefreshResult({ ok: false, error: String(e) });
     }
   }
 
@@ -66,26 +70,30 @@ export default function Diagnostics() {
 
   async function seedServerWithTokens() {
     if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
-      alert("Need access_token + refresh_token + id_token.\nClick “Refresh Tokens”, then “Reload Tokens”, then try again.");
+      alert(
+        "Need access_token + refresh_token + id_token. Click ‘Refresh Tokens’, then ‘Reload Tokens’, then try again."
+      );
       return;
     }
     const r = await fetch("/api/debug/tokens/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "include",
       body: JSON.stringify({
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         id_token: tokens.id_token,
       }),
+      credentials: "include",
     });
-    setSeedResult(await r.json());
+    const j = await r.json();
+    setSeedResult(j);
     await reloadTokens();
   }
 
   async function callGraphMe() {
     const r = await fetch("/api/graph/me", { credentials: "include" });
-    setMeResult(await r.json());
+    const j = await r.json();
+    setMeResult(j);
   }
 
   async function createTestPage() {
@@ -101,7 +109,8 @@ export default function Diagnostics() {
         html: "<p>Created via Diagnostics button ✅</p>",
       }),
     });
-    setCreateResult(await r.json());
+    const j = await r.json();
+    setCreateResult(j);
   }
 
   async function batchCreateSections() {
@@ -124,7 +133,8 @@ export default function Diagnostics() {
         ],
       }),
     });
-    setBatchResult(await r.json());
+    const j = await r.json();
+    setBatchResult(j);
   }
 
   async function sweepTestNotes() {
@@ -133,11 +143,35 @@ export default function Diagnostics() {
       method: "POST",
       credentials: "include",
     });
-    setCleanupResult(await r.json());
+    const j = await r.json();
+    setCleanupResult(j);
+  }
+
+  async function createSampleFoodNote() {
+    setFoodSampleResult({ loading: true });
+    const r = await fetch("/api/onenote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        act: "create",
+        notebookName: "AliceChatGPT",
+        sectionName: "Food",
+        title: "[FOOD] Sample from Diagnostics",
+        html: "<p>200 kcal</p>",
+      }),
+    });
+    const j = await r.json();
+    setFoodSampleResult(j);
   }
 
   return (
-    <main style={{ padding: 24, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
+    <main
+      style={{
+        padding: 24,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      }}
+    >
       <h1>Alice OneNote Router — Diagnostics</h1>
       <p>
         Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong>
@@ -146,10 +180,8 @@ export default function Diagnostics() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0" }}>
         <a className="btn" href="/api/auth/logout">Hard Reset + Logout</a>
         <a className="btn" href="/api/auth/login">Force Microsoft Login</a>
-        {/* Refresh via fetch (no navigation) */}
-        <button className="btn" onClick={refreshTokensInPlace} disabled={isRefreshing}>
-          {isRefreshing ? "Refreshing…" : "Refresh Tokens"}
-        </button>
+        {/* Changed from <a href="/api/auth/refresh"> to a button using fetch */}
+        <button className="btn" onClick={doRefreshTokens}>Refresh Tokens (stay here)</button>
         <a className="btn" href="/api/debug/clear-cookies">Clear Session Cookies</a>
         <a className="btn" href="/">Logout (App)</a>
         <button className="btn" onClick={reloadTokens}>Reload Tokens</button>
@@ -160,8 +192,13 @@ export default function Diagnostics() {
 
       <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
         <pre style={{ whiteSpace: "pre-wrap" }}>
-{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${String(tokens.access_token).slice(0,30)}…\n\n` : ""}
-{jsonPretty(tokens)}
+          {tokens?.access_token
+            ? `access_token length: ${tokens.access_token.length} · starts with:\n${tokens.access_token.slice(
+                0,
+                30
+              )}…\n\n`
+            : ""}
+          {JSON.stringify(tokens, null, 2)}
         </pre>
       </Section>
 
@@ -173,13 +210,16 @@ export default function Diagnostics() {
         <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
         <button className="btn" onClick={batchCreateSections}>Batch create sections</button>
         <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
+        <button className="btn" onClick={createSampleFoodNote}>Create sample Food note</button>
       </div>
 
-      <Section title="Seed Result"><pre>{jsonPretty(seedResult)}</pre></Section>
-      <Section title="Graph /me Result"><pre>{jsonPretty(meResult)}</pre></Section>
-      <Section title="Create Test Page Result"><pre>{jsonPretty(createResult)}</pre></Section>
-      <Section title="Batch Create Sections Result"><pre>{jsonPretty(batchResult)}</pre></Section>
-      <Section title="Cleanup (Sweep Test Notes) Result"><pre>{jsonPretty(cleanupResult)}</pre></Section>
+      <Section title="Refresh Result"><pre>{fmt(refreshResult)}</pre></Section>
+      <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
+      <Section title="Graph /me Result"><pre>{fmt(meResult)}</pre></Section>
+      <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
+      <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
+      <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
+      <Section title="Sample Food Log Result"><pre>{fmt(foodSampleResult)}</pre></Section>
 
       <style jsx>{`
         .btn {
@@ -192,27 +232,37 @@ export default function Diagnostics() {
           background: #f7f7f9;
           cursor: pointer;
         }
-        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .btn:hover { background: #eee; }
       `}</style>
     </main>
   );
 }
 
-// --- small helpers ---
 function Section({ title, children }) {
   return (
     <section style={{ marginTop: 18 }}>
       <h3 style={{ margin: "8px 0" }}>{title}</h3>
-      <div style={{ background: "#0d1117", color: "#c9d1d9", padding: 12, borderRadius: 6, overflowX: "auto" }}>
+      <div
+        style={{
+          background: "#0d1117",
+          color: "#c9d1d9",
+          padding: 12,
+          borderRadius: 6,
+          overflowX: "auto",
+        }}
+      >
         {children}
       </div>
     </section>
   );
 }
 
-function jsonPretty(x) {
+function fmt(x) {
   if (!x) return "—";
   if (x.loading) return "Loading…";
-  try { return JSON.stringify(x, null, 2); } catch { return String(x); }
+  try {
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return String(x);
+  }
 }
