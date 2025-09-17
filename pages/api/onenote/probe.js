@@ -1,34 +1,28 @@
 // pages/api/onenote/probe.js
-import { kvGet } from '@/lib/kv';
-
-async function graphFetch(path, token) {
-  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, statusText: res.statusText, text };
-}
+import { getGraphToken, isJwt } from '@/lib/auth-token';
 
 export default async function handler(req, res) {
   try {
-    const keys = ['graph:access_token','ms:access_token','access_token'];
-    let token = null;
-    for (const k of keys) {
-      const v = await kvGet(k);
-      if (typeof v === 'string' && v.includes('.') && v.startsWith('eyJ')) { token = v; break; }
-    }
+    const { token, source } = await getGraphToken(req);
     if (!token) {
-      return res.status(400).json({ ok: false, error: 'No server token found. Call /api/onenote/seed-any first.' });
+      return res.status(200).json({ ok: false, error: 'No server token found. Use diagnostics: Seed Server (or Force Microsoft Login).' });
     }
 
-    const me = await graphFetch('/me', token);
-    const bodySnippet = me.text.length > 500 ? me.text.slice(0, 500) + '…' : me.text;
+    const r = await fetch('https://graph.microsoft.com/v1.0/me', {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    });
+
+    const text = await r.text();
+    let body; try { body = JSON.parse(text); } catch { body = { raw: text } }
 
     return res.status(200).json({
-      ok: me.ok,
-      status: me.status,
-      statusText: me.statusText,
-      bodySnippet
+      ok: r.ok,
+      status: r.status,
+      statusText: r.statusText,
+      source,
+      tokenLooksJwt: isJwt(token),
+      body: body,
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
