@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 export default function Diagnostics() {
+  // --- state ---
   const [tokens, setTokens] = useState(null);
   const [status, setStatus] = useState("No tokens captured yet");
   const [seedResult, setSeedResult] = useState(null);
@@ -9,7 +10,9 @@ export default function Diagnostics() {
   const [createResult, setCreateResult] = useState(null);
   const [batchResult, setBatchResult] = useState(null);
   const [cleanupResult, setCleanupResult] = useState(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // --- helpers ---
   const baseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
     return `${window.location.protocol}//${window.location.host}`;
@@ -18,141 +21,147 @@ export default function Diagnostics() {
   const wantFull = useMemo(() => {
     if (typeof window === "undefined") return false;
     const p = new URLSearchParams(window.location.search);
-    return ["1","true","yes"].includes((p.get("full") || "").toLowerCase());
+    return ["1", "true", "yes"].includes((p.get("full") || "").toLowerCase());
   }, []);
 
   async function reloadTokens() {
     if (!baseUrl) return;
     try {
-      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, { credentials: "include" }).then(r => r.json());
+      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, {
+        credentials: "include",
+      }).then((r) => r.json());
       setTokens(j);
       const hasAny = !!(j?.access_token || j?.refresh_token || j?.id_token);
       setStatus(hasAny ? "Tokens present" : "No tokens captured yet");
-    } catch (e) {
+    } catch {
       setStatus("Failed to load tokens");
     }
   }
-  useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
+
+  useEffect(() => {
+    reloadTokens();
+  }, [baseUrl, wantFull]);
+
+  // --- quick actions ---
+  async function refreshTokensInPlace() {
+    setIsRefreshing(true);
+    try {
+      // This hits /api/auth/refresh but stays on the same page
+      await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
+      await reloadTokens();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }
 
   async function copyAuthHeader() {
-    if (!tokens?.access_token) { alert("No access_token in memory."); return; }
+    if (!tokens?.access_token) {
+      alert("No access_token in memory.");
+      return;
+    }
     const s = `Authorization: Bearer ${tokens.access_token}`;
     await navigator.clipboard.writeText(s);
     alert("Copied Authorization header to clipboard.");
   }
 
   async function seedServerWithTokens() {
-    try {
-      if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
-        alert("Need access_token + refresh_token + id_token. Click ‘Refresh Tokens’, then ‘Reload Tokens’, then try again.");
-        return;
-      }
-      const r = await fetch("/api/debug/tokens/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          access_token: tokens.access_token,
-          refresh_token: tokens.refresh_token,
-          id_token: tokens.id_token,
-        }),
-        credentials: "include",
-      });
-      const text = await r.text();
-      let j; try { j = JSON.parse(text); } catch { j = { ok:false, error:`Non-JSON: ${text.slice(0,300)}…` }; }
-      setSeedResult(j);
-      await reloadTokens();
-    } catch (e) {
-      setSeedResult({ ok:false, error: String(e) });
+    if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
+      alert("Need access_token + refresh_token + id_token.\nClick “Refresh Tokens”, then “Reload Tokens”, then try again.");
+      return;
     }
+    const r = await fetch("/api/debug/tokens/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        id_token: tokens.id_token,
+      }),
+    });
+    setSeedResult(await r.json());
+    await reloadTokens();
   }
 
   async function callGraphMe() {
-    try {
-      const r = await fetch("/api/graph/me", { credentials: "include" });
-      const text = await r.text();
-      let j; try { j = JSON.parse(text); } catch { j = { ok:false, error:`Non-JSON: ${text.slice(0,300)}…` }; }
-      setMeResult(j);
-    } catch (e) {
-      setMeResult({ ok:false, error: String(e) });
-    }
+    const r = await fetch("/api/graph/me", { credentials: "include" });
+    setMeResult(await r.json());
   }
 
   async function createTestPage() {
     setCreateResult({ loading: true });
-    try {
-      const r = await fetch("/api/debug/create-test-page", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          notebookName: "AliceChatGPT",
-          sectionName: "Hobbies",
-          title: "[DIAG] Test page from Diagnostics",
-          html: "<p>Created via Diagnostics button ✅</p>",
-        }),
-      });
-      const text = await r.text();
-      let j; try { j = JSON.parse(text); } catch { j = { ok:false, error:`Non-JSON: ${text.slice(0,300)}…` }; }
-      setCreateResult(j);
-    } catch (e) {
-      setCreateResult({ ok:false, error: String(e) });
-    }
+    const r = await fetch("/api/debug/create-test-page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        notebookName: "AliceChatGPT",
+        sectionName: "Hobbies",
+        title: "[DIAG] Test page from Diagnostics",
+        html: "<p>Created via Diagnostics button ✅</p>",
+      }),
+    });
+    setCreateResult(await r.json());
   }
 
   async function batchCreateSections() {
     setBatchResult({ loading: true });
-    try {
-      const r = await fetch("/api/graph/sections-create-batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          notebookName: "AliceChatGPT",
-          sectionNames: [
-            "Inbox","Food","Fitness - Workouts","Fitness - Step Counts",
-            "Hobbies","Travel","Taxes","Recycle Bin"
-          ],
-        }),
-      });
-      const text = await r.text();
-      let j; try { j = JSON.parse(text); } catch { j = { ok:false, error:`Non-JSON: ${text.slice(0,300)}…` }; }
-      setBatchResult(j);
-    } catch (e) {
-      setBatchResult({ ok:false, error: String(e) });
-    }
+    const r = await fetch("/api/graph/sections-create-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        notebookName: "AliceChatGPT",
+        sectionNames: [
+          "Inbox",
+          "Food",
+          "Fitness - Workouts",
+          "Fitness - Step Counts",
+          "Hobbies",
+          "Travel",
+          "Taxes",
+          "Recycle Bin",
+        ],
+      }),
+    });
+    setBatchResult(await r.json());
   }
 
   async function sweepTestNotes() {
     setCleanupResult({ loading: true });
-    try {
-      const r = await fetch("/api/graph/cleanup-tests", { method:"POST", credentials:"include" });
-      const text = await r.text();
-      let j; try { j = JSON.parse(text); } catch { j = { ok:false, error:`Non-JSON: ${text.slice(0,300)}…` }; }
-      setCleanupResult(j);
-    } catch (e) {
-      setCleanupResult({ ok:false, error: String(e) });
-    }
+    const r = await fetch("/api/graph/cleanup-tests", {
+      method: "POST",
+      credentials: "include",
+    });
+    setCleanupResult(await r.json());
   }
 
   return (
     <main style={{ padding: 24, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
       <h1>Alice OneNote Router — Diagnostics</h1>
-      <p>Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong></p>
+      <p>
+        Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong>
+      </p>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0" }}>
         <a className="btn" href="/api/auth/logout">Hard Reset + Logout</a>
         <a className="btn" href="/api/auth/login">Force Microsoft Login</a>
-        <a className="btn" href="/api/auth/refresh">Refresh Tokens</a>
+        {/* Refresh via fetch (no navigation) */}
+        <button className="btn" onClick={refreshTokensInPlace} disabled={isRefreshing}>
+          {isRefreshing ? "Refreshing…" : "Refresh Tokens"}
+        </button>
         <a className="btn" href="/api/debug/clear-cookies">Clear Session Cookies</a>
         <a className="btn" href="/">Logout (App)</a>
         <button className="btn" onClick={reloadTokens}>Reload Tokens</button>
-        <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">Open /api/debug/tokens?full=1</a>
+        <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">
+          Open /api/debug/tokens?full=1
+        </a>
       </div>
 
       <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
         <pre style={{ whiteSpace: "pre-wrap" }}>
-{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${tokens.access_token.slice(0,30)}…\n\n` : ""}
-{JSON.stringify(tokens, null, 2)}
+{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${String(tokens.access_token).slice(0,30)}…\n\n` : ""}
+{jsonPretty(tokens)}
         </pre>
       </Section>
 
@@ -166,11 +175,11 @@ export default function Diagnostics() {
         <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
       </div>
 
-      <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
-      <Section title="Graph /me Result"><pre>{fmt(meResult)}</pre></Section>
-      <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
-      <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
-      <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
+      <Section title="Seed Result"><pre>{jsonPretty(seedResult)}</pre></Section>
+      <Section title="Graph /me Result"><pre>{jsonPretty(meResult)}</pre></Section>
+      <Section title="Create Test Page Result"><pre>{jsonPretty(createResult)}</pre></Section>
+      <Section title="Batch Create Sections Result"><pre>{jsonPretty(batchResult)}</pre></Section>
+      <Section title="Cleanup (Sweep Test Notes) Result"><pre>{jsonPretty(cleanupResult)}</pre></Section>
 
       <style jsx>{`
         .btn {
@@ -183,12 +192,14 @@ export default function Diagnostics() {
           background: #f7f7f9;
           cursor: pointer;
         }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .btn:hover { background: #eee; }
       `}</style>
     </main>
   );
 }
 
+// --- small helpers ---
 function Section({ title, children }) {
   return (
     <section style={{ marginTop: 18 }}>
@@ -200,7 +211,7 @@ function Section({ title, children }) {
   );
 }
 
-function fmt(x) {
+function jsonPretty(x) {
   if (!x) return "—";
   if (x.loading) return "Loading…";
   try { return JSON.stringify(x, null, 2); } catch { return String(x); }
