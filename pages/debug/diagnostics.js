@@ -1,5 +1,13 @@
 // pages/debug/diagnostics.js
-// One-stop Diagnostics with all the buttons you need on one page.
+// Single page with all controls + live output pane.
+// Buttons:
+//  • Refresh Tokens
+//  • Seed Server from Clipboard (auto-detects JWT or refresh_token)
+//  • Probe Graph /me
+//  • Logout (clear cookies + KV)
+//  • Clear Server Tokens
+//  • View Tokens JSON
+//  • Create Test Page (Food & Nutrition – Meals)
 
 import { useState } from 'react';
 
@@ -14,77 +22,84 @@ const btn = {
 const row = { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12 };
 
 export default function Diagnostics() {
-  const [msg, setMsg] = useState('Idle');
+  const [status, setStatus] = useState('Idle');
+  const [log, setLog] = useState([]);
 
-  async function copyGraphAccessToken() {
-    setMsg('Fetching token from KV…');
+  function append(name, payload) {
+    setLog((prev) => [
+      { ts: new Date().toLocaleTimeString(), name, payload },
+      ...prev.slice(0, 199),
+    ]);
+  }
+
+  async function refreshTokens() {
+    setStatus('Refreshing tokens…');
     try {
-      const r = await fetch('/api/onenote/access-token?fmt=txt', { cache: 'no-store' });
-      const t = await r.text();
-      if (!r.ok || !t || t === 'NO_TOKEN') {
-        setMsg('No Graph access_token in KV. Seed first.');
-        return;
-      }
-      await navigator.clipboard.writeText(t);
-      setMsg(`Copied Graph access_token (eyJ… len=${t.length})`);
-    } catch (e) {
-      setMsg('Copy failed: ' + e.message);
-    }
+      const r = await fetch('/api/debug/tokens?refresh=1', { cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      append('Refresh Tokens', j);
+      setStatus('Refresh done.');
+    } catch (e) { setStatus('Refresh failed'); append('Refresh Tokens (error)', e.message); }
   }
 
   async function seedFromClipboardSmart() {
-    setMsg('Reading clipboard…');
+    setStatus('Reading clipboard…');
     try {
       const clip = await navigator.clipboard.readText();
-      // Try to find eyJ JWT first
+
+      // Try to locate a JWT (eyJ…)
       const mJwt = clip.match(/\b(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\b/);
       if (mJwt) {
-        setMsg('Seeding JWT token…');
+        setStatus('Seeding JWT…');
         const r = await fetch('/api/onenote/seed', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: mJwt[1] }),
         });
         const j = await r.json();
-        setMsg(r.ok ? 'Seeded JWT OK.' : 'Seed error: ' + JSON.stringify(j));
+        append('Seed JWT', j);
+        setStatus(r.ok ? 'Seeded JWT OK.' : 'Seed error.');
         return;
       }
-      // Else try refresh_token (starts with M.C… often)
+
+      // Fallback: try to locate a refresh_token (from the JSON dump)
       const mRefresh = clip.match(/"refresh_token"\s*:\s*"([^"]+)"/) || clip.match(/\b(M\.C[^\s"]+)\b/);
       const refreshToken = mRefresh?.[1];
       if (refreshToken) {
-        setMsg('Seeding via refresh_token…');
+        setStatus('Seeding via refresh_token…');
         const r = await fetch('/api/onenote/seed-any', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ refresh_token: refreshToken }),
         });
         const j = await r.json();
-        setMsg(r.ok ? 'Refreshed + seeded OK.' : 'Refresh/seed error: ' + JSON.stringify(j));
+        append('Seed via refresh_token', j);
+        setStatus(r.ok ? 'Refreshed + seeded OK.' : 'Refresh/seed error.');
         return;
       }
-      setMsg('Clipboard has neither a JWT (eyJ…) nor refresh_token.');
-    } catch (e) {
-      setMsg('Seed failed: ' + e.message);
-    }
+
+      setStatus('Clipboard had neither a JWT nor refresh_token.');
+      append('Seed from Clipboard', { error: 'No JWT or refresh_token found in clipboard' });
+    } catch (e) { setStatus('Seed failed'); append('Seed from Clipboard (error)', e.message); }
   }
 
   async function probe() {
-    setMsg('Probing Graph /me…');
+    setStatus('Probing Graph /me…');
     try {
       const r = await fetch('/api/onenote/probe', { cache: 'no-store' });
       const j = await r.json();
-      setMsg(r.ok && j.ok ? 'Probe OK: 200' : 'Probe failed: ' + JSON.stringify(j));
-    } catch (e) {
-      setMsg('Probe error: ' + e.message);
-    }
+      append('Probe /me', j);
+      setStatus(r.ok && j.ok ? 'Probe OK: 200' : 'Probe failed');
+    } catch (e) { setStatus('Probe error'); append('Probe /me (error)', e.message); }
   }
 
   async function logoutAll() {
-    setMsg('Logging out (cookies + KV)…');
+    setStatus('Logging out…');
     try {
       const r = await fetch('/api/auth/logout', { method: 'POST' });
       const j = await r.json();
+      append('Logout', j);
+
       // Best-effort client clears
       try { localStorage.clear(); } catch {}
       try { sessionStorage.clear(); } catch {}
@@ -92,25 +107,23 @@ export default function Diagnostics() {
         const n = c.split('=')[0].trim();
         if (n) document.cookie = `${n}=; Path=/; Max-Age=0; SameSite=Lax`;
       });
-      setMsg(r.ok ? 'Logged out. Now click Force Microsoft Login.' : 'Logout error: ' + JSON.stringify(j));
-    } catch (e) {
-      setMsg('Logout failed: ' + e.message);
-    }
+
+      setStatus('Logged out. Click Force Microsoft Login if needed.');
+    } catch (e) { setStatus('Logout failed'); append('Logout (error)', e.message); }
   }
 
   async function clearServerTokens() {
-    setMsg('Clearing server tokens…');
+    setStatus('Clearing server tokens…');
     try {
       const r = await fetch('/api/onenote/token-clear', { method: 'POST' });
       const j = await r.json();
-      setMsg(r.ok ? 'Server tokens cleared.' : 'Clear error: ' + JSON.stringify(j));
-    } catch (e) {
-      setMsg('Clear failed: ' + e.message);
-    }
+      append('Token Clear', j);
+      setStatus('Server tokens cleared.');
+    } catch (e) { setStatus('Clear failed'); append('Token Clear (error)', e.message); }
   }
 
   async function createTestPage() {
-    setMsg('Creating OneNote test page…');
+    setStatus('Creating test page…');
     try {
       const r = await fetch('/api/onenote', {
         method: 'POST',
@@ -124,10 +137,9 @@ export default function Diagnostics() {
         }),
       });
       const j = await r.json();
-      setMsg(r.ok ? `Create OK` : 'Create failed: ' + JSON.stringify(j));
-    } catch (e) {
-      setMsg('Create failed: ' + e.message);
-    }
+      append('Create Page', j);
+      setStatus(r.ok ? 'Create OK' : 'Create failed');
+    } catch (e) { setStatus('Create failed'); append('Create Page (error)', e.message); }
   }
 
   return (
@@ -136,8 +148,8 @@ export default function Diagnostics() {
 
       <h3>Tokens</h3>
       <div style={row}>
-        <button style={btn} onClick={copyGraphAccessToken}>📋 Copy Graph access_token (from KV)</button>
-        <button style={btn} onClick={seedFromClipboardSmart}>🌱 Seed Server from Clipboard (JWT or refresh_token)</button>
+        <button style={btn} onClick={refreshTokens}>🔄 Refresh Tokens</button>
+        <button style={btn} onClick={seedFromClipboardSmart}>🌱 Seed Server from Clipboard</button>
         <button style={btn} onClick={probe}>🧪 Probe Graph /me</button>
         <a href="/api/debug/tokens?full=1" style={{ ...btn, textDecoration: 'none', display: 'inline-block' }}>🔎 View Tokens JSON</a>
       </div>
@@ -154,13 +166,42 @@ export default function Diagnostics() {
         <button style={btn} onClick={createTestPage}>📝 Create Test Page (Food & Nutrition – Meals)</button>
       </div>
 
-      <p style={{ marginTop: 16, color: '#555' }}><b>Status:</b> {msg}</p>
+      <h3 style={{ marginTop: 24 }}>Status</h3>
+      <p><b>{status}</b></p>
 
-      <hr style={{ margin: '20px 0' }} />
+      <h3>Output</h3>
+      <div style={{ maxHeight: 420, overflow: 'auto', border: '1px solid #eee', borderRadius: 8 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: '#fafafa' }}>
+              <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #eee', width: 120 }}>Time</th>
+              <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #eee', width: 180 }}>Action</th>
+              <th style={{ textAlign: 'left', padding: 8, borderBottom: '1px solid #eee' }}>Payload</th>
+            </tr>
+          </thead>
+          <tbody>
+            {log.map((row, i) => (
+              <tr key={i}>
+                <td style={{ padding: 8, borderBottom: '1px solid #f3f3f3' }}>{row.ts}</td>
+                <td style={{ padding: 8, borderBottom: '1px solid #f3f3f3' }}>{row.name}</td>
+                <td style={{ padding: 8, borderBottom: '1px solid #f3f3f3', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', whiteSpace: 'pre-wrap' }}>
+                  {typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload, null, 2)}
+                </td>
+              </tr>
+            ))}
+            {log.length === 0 && (
+              <tr><td colSpan={3} style={{ padding: 12, color: '#888' }}>No output yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <hr style={{ marginTop: 24 }} />
       <ol>
-        <li>Click <b>🚪 Logout</b> if things feel stuck.</li>
-        <li>Click <b>🌱 Seed Server from Clipboard</b> (copy either full tokens JSON containing <code>refresh_token</code> or copy the actual JWT that starts with <code>eyJ</code>).</li>
-        <li>Click <b>🧪 Probe Graph /me</b>. If OK, you’re good to log pages.</li>
+        <li>Click <b>🔄 Refresh Tokens</b>.</li>
+        <li>Copy either your tokens JSON (it contains <code>refresh_token</code>) or a raw JWT (starts with <code>eyJ</code>) to clipboard.</li>
+        <li>Click <b>🌱 Seed Server from Clipboard</b>.</li>
+        <li>Click <b>🧪 Probe Graph /me</b>. If OK, you’re ready to log pages.</li>
       </ol>
     </div>
   );
