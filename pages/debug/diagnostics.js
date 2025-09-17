@@ -1,223 +1,167 @@
 // pages/debug/diagnostics.js
-import { useEffect, useMemo, useState } from "react";
+// One-stop Diagnostics with all the buttons you need on one page.
+
+import { useState } from 'react';
+
+const btn = {
+  padding: '10px 14px',
+  borderRadius: 10,
+  border: '1px solid #ccc',
+  background: '#f7f7f7',
+  cursor: 'pointer',
+};
+
+const row = { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12 };
 
 export default function Diagnostics() {
-  const [tokens, setTokens] = useState(null);
-  const [status, setStatus] = useState("No tokens captured yet");
-  const [seedResult, setSeedResult] = useState(null);
-  const [meResult, setMeResult] = useState(null);
-  const [createResult, setCreateResult] = useState(null);
-  const [batchResult, setBatchResult] = useState(null);
-  const [cleanupResult, setCleanupResult] = useState(null);
+  const [msg, setMsg] = useState('Idle');
 
-  const baseUrl = useMemo(() => {
-    if (typeof window === "undefined") return "";
-    return `${window.location.protocol}//${window.location.host}`;
-  }, []);
-
-  const wantFull = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    const p = new URLSearchParams(window.location.search);
-    return ["1","true","yes"].includes((p.get("full") || "").toLowerCase());
-  }, []);
-
-  async function reloadTokens() {
-    if (!baseUrl) return;
+  async function copyGraphAccessToken() {
+    setMsg('Fetching token from KV…');
     try {
-      const j = await fetch(`${baseUrl}/api/debug/tokens${wantFull ? "?full=1" : ""}`, {
-        credentials: "include",
-      }).then(r => r.json());
-      setTokens(j);
-      const hasAny = !!(j?.access_token || j?.refresh_token || j?.id_token);
-      setStatus(hasAny ? "Tokens present" : "No tokens captured yet");
-    } catch (e) {
-      setStatus("Failed to load tokens");
-    }
-  }
-  useEffect(() => { reloadTokens(); }, [baseUrl, wantFull]);
-
-  async function copyAuthHeader() {
-    try {
-      if (!tokens?.access_token) { alert("No access_token in memory."); return; }
-      const s = `Authorization: Bearer ${tokens.access_token}`;
-      await navigator.clipboard.writeText(s);
-      alert("Copied Authorization header to clipboard.");
-    } catch (e) {
-      alert("Could not copy to clipboard.");
-    }
-  }
-
-  // Generic fetch with timeout that never leaves the UI in loading state
-  async function fetchJSON(url, opts = {}, timeoutMs = 20000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...opts, signal: ctrl.signal });
-      const ct = res.headers.get("content-type") || "";
-      const body = ct.includes("application/json") ? await res.json() : await res.text();
-      return { status: res.status, ok: res.ok, body };
-    } catch (e) {
-      return { status: 0, ok: false, body: { ok: false, error: String(e?.message || e) } };
-    } finally {
-      clearTimeout(t);
-    }
-  }
-
-  async function seedServerWithTokens() {
-    setSeedResult({ loading: true });
-    try {
-      if (!tokens?.access_token || !tokens?.refresh_token || !tokens?.id_token) {
-        setSeedResult({ ok: false, error: "Need access_token + refresh_token + id_token. Click ‘Refresh Tokens’, then ‘Reload Tokens’, then try again." });
+      const r = await fetch('/api/onenote/access-token?fmt=txt', { cache: 'no-store' });
+      const t = await r.text();
+      if (!r.ok || !t || t === 'NO_TOKEN') {
+        setMsg('No Graph access_token in KV. Seed first.');
         return;
       }
-      const r = await fetchJSON("/api/debug/tokens/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          access_token: tokens.access_token,
-          refresh_token: tokens.refresh_token,
-          id_token: tokens.id_token,
-        }),
-      });
-      setSeedResult(r.body);
-      await reloadTokens();
+      await navigator.clipboard.writeText(t);
+      setMsg(`Copied Graph access_token (eyJ… len=${t.length})`);
     } catch (e) {
-      setSeedResult({ ok: false, error: String(e?.message || e) });
+      setMsg('Copy failed: ' + e.message);
     }
   }
 
-  async function callGraphMe() {
-    setMeResult({ loading: true });
-    const r = await fetchJSON("/api/onenote?act=me", { credentials: "include" });
-    setMeResult(r.body);
+  async function seedFromClipboardSmart() {
+    setMsg('Reading clipboard…');
+    try {
+      const clip = await navigator.clipboard.readText();
+      // Try to find eyJ JWT first
+      const mJwt = clip.match(/\b(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\b/);
+      if (mJwt) {
+        setMsg('Seeding JWT token…');
+        const r = await fetch('/api/onenote/seed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: mJwt[1] }),
+        });
+        const j = await r.json();
+        setMsg(r.ok ? 'Seeded JWT OK.' : 'Seed error: ' + JSON.stringify(j));
+        return;
+      }
+      // Else try refresh_token (starts with M.C… often)
+      const mRefresh = clip.match(/"refresh_token"\s*:\s*"([^"]+)"/) || clip.match(/\b(M\.C[^\s"]+)\b/);
+      const refreshToken = mRefresh?.[1];
+      if (refreshToken) {
+        setMsg('Seeding via refresh_token…');
+        const r = await fetch('/api/onenote/seed-any', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        const j = await r.json();
+        setMsg(r.ok ? 'Refreshed + seeded OK.' : 'Refresh/seed error: ' + JSON.stringify(j));
+        return;
+      }
+      setMsg('Clipboard has neither a JWT (eyJ…) nor refresh_token.');
+    } catch (e) {
+      setMsg('Seed failed: ' + e.message);
+    }
+  }
+
+  async function probe() {
+    setMsg('Probing Graph /me…');
+    try {
+      const r = await fetch('/api/onenote/probe', { cache: 'no-store' });
+      const j = await r.json();
+      setMsg(r.ok && j.ok ? 'Probe OK: 200' : 'Probe failed: ' + JSON.stringify(j));
+    } catch (e) {
+      setMsg('Probe error: ' + e.message);
+    }
+  }
+
+  async function logoutAll() {
+    setMsg('Logging out (cookies + KV)…');
+    try {
+      const r = await fetch('/api/auth/logout', { method: 'POST' });
+      const j = await r.json();
+      // Best-effort client clears
+      try { localStorage.clear(); } catch {}
+      try { sessionStorage.clear(); } catch {}
+      document.cookie.split(';').forEach(c => {
+        const n = c.split('=')[0].trim();
+        if (n) document.cookie = `${n}=; Path=/; Max-Age=0; SameSite=Lax`;
+      });
+      setMsg(r.ok ? 'Logged out. Now click Force Microsoft Login.' : 'Logout error: ' + JSON.stringify(j));
+    } catch (e) {
+      setMsg('Logout failed: ' + e.message);
+    }
+  }
+
+  async function clearServerTokens() {
+    setMsg('Clearing server tokens…');
+    try {
+      const r = await fetch('/api/onenote/token-clear', { method: 'POST' });
+      const j = await r.json();
+      setMsg(r.ok ? 'Server tokens cleared.' : 'Clear error: ' + JSON.stringify(j));
+    } catch (e) {
+      setMsg('Clear failed: ' + e.message);
+    }
   }
 
   async function createTestPage() {
-    setCreateResult({ loading: true });
-    const r = await fetchJSON("/api/debug/create-test-page", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        notebookName: "AliceChatGPT",
-        sectionName: "Hobbies",
-        title: "[DIAG] Test page from Diagnostics",
-        html: "<p>Created via Diagnostics button ✅</p>",
-      }),
-    });
-    // Always set a result so the UI never stays "Loading…"
-    setCreateResult(r.body);
-  }
-
-  async function batchCreateSections() {
-    setBatchResult({ loading: true });
-    const r = await fetchJSON("/api/onenote", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        act: "sections-batch",
-        notebookName: "AliceChatGPT",
-        sectionNames: [
-          "Inbox",
-          "Food",
-          "Fitness - Workouts",
-          "Fitness - Step Counts",
-          "Hobbies",
-          "Travel",
-          "Taxes",
-          "Recycle Bin"
-        ],
-      }),
-    });
-    setBatchResult(r.body);
-  }
-
-  async function sweepTestNotes() {
-    setCleanupResult({ loading: true });
-    const r = await fetchJSON("/api/graph/cleanup-tests", {
-      method: "POST",
-      credentials: "include",
-    });
-    setCleanupResult(r.body);
+    setMsg('Creating OneNote test page…');
+    try {
+      const r = await fetch('/api/onenote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          act: 'create',
+          notebookName: 'AliceChatGPT',
+          sectionName: 'Food and Nutrition – Meals',
+          title: `[FOOD] Smoke test (${new Date().toLocaleString()})`,
+          html: 'ok',
+        }),
+      });
+      const j = await r.json();
+      setMsg(r.ok ? `Create OK` : 'Create failed: ' + JSON.stringify(j));
+    } catch (e) {
+      setMsg('Create failed: ' + e.message);
+    }
   }
 
   return (
-    <main style={{ padding: 24, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-      <h1>Alice OneNote Router — Diagnostics</h1>
-      <p>Base: <code>{baseUrl}</code> · Status: <strong>{status}</strong></p>
+    <div style={{ fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', padding: 24, lineHeight: 1.5 }}>
+      <h1>Alice Diagnostics</h1>
 
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0" }}>
-        <button className="btn" onClick={async () => {
-          // Do refresh via XHR so you STAY on this page
-          const r = await fetchJSON("/api/auth/refresh", { method: "POST", credentials: "include" });
-          // Show a toast-y result inline, then reload tokens
-          alert(r.ok ? "Tokens refreshed." : `Refresh failed: ${JSON.stringify(r.body)}`);
-          reloadTokens();
-        }}>Refresh Tokens (stay)</button>
-
-        <a className="btn" href="/api/auth/login">Force Microsoft Login</a>
-        <a className="btn" href="/api/debug/clear-cookies">Clear Session Cookies</a>
-        <a className="btn" href="/">Logout (App)</a>
-        <a className="btn" href="/api/debug/tokens?full=1" target="_blank" rel="noreferrer">Open tokens (full)</a>
-        <button className="btn" onClick={reloadTokens}>Reload Tokens</button>
+      <h3>Tokens</h3>
+      <div style={row}>
+        <button style={btn} onClick={copyGraphAccessToken}>📋 Copy Graph access_token (from KV)</button>
+        <button style={btn} onClick={seedFromClipboardSmart}>🌱 Seed Server from Clipboard (JWT or refresh_token)</button>
+        <button style={btn} onClick={probe}>🧪 Probe Graph /me</button>
+        <a href="/api/debug/tokens?full=1" style={{ ...btn, textDecoration: 'none', display: 'inline-block' }}>🔎 View Tokens JSON</a>
       </div>
 
-      <Section title={`Tokens (${wantFull ? "full, not truncated" : "masked"})`}>
-        <pre style={{ whiteSpace: "pre-wrap" }}>
-{tokens?.access_token ? `access_token length: ${tokens.access_token.length} · starts with:\n${String(tokens.access_token).slice(0,30)}…\n\n` : ""}
-{fmt(tokens)}
-        </pre>
-      </Section>
-
-      <h3 style={{ marginTop: 18 }}>Quick Actions</h3>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "8px 0" }}>
-        <button className="btn" onClick={copyAuthHeader}>Copy Authorization header</button>
-        <button className="btn" onClick={seedServerWithTokens}>Seed server with tokens</button>
-        <button className="btn" onClick={callGraphMe}>Call Graph /me (server)</button>
-        <button className="btn" onClick={createTestPage}>Create test page in Hobbies</button>
-        <button className="btn" onClick={batchCreateSections}>Batch create sections</button>
-        <button className="btn" onClick={sweepTestNotes}>Sweep test notes → Recycle Bin</button>
+      <h3 style={{ marginTop: 24 }}>Session</h3>
+      <div style={row}>
+        <button style={btn} onClick={logoutAll}>🚪 Logout (clear cookies + KV)</button>
+        <button style={btn} onClick={clearServerTokens}>🧹 Clear Server Tokens</button>
+        <a href="/api/onenote/token-peek" style={{ ...btn, textDecoration: 'none', display: 'inline-block' }}>👀 Token Peek</a>
       </div>
 
-      <Section title="Seed Result"><pre>{fmt(seedResult)}</pre></Section>
-      <Section title="Graph /me Result"><pre>{fmt(meResult)}</pre></Section>
-      <Section title="Create Test Page Result"><pre>{fmt(createResult)}</pre></Section>
-      <Section title="Batch Create Sections Result"><pre>{fmt(batchResult)}</pre></Section>
-      <Section title="Cleanup (Sweep Test Notes) Result"><pre>{fmt(cleanupResult)}</pre></Section>
+      <h3 style={{ marginTop: 24 }}>OneNote</h3>
+      <div style={row}>
+        <button style={btn} onClick={createTestPage}>📝 Create Test Page (Food & Nutrition – Meals)</button>
+      </div>
 
-      <style jsx>{`
-        .btn {
-          display: inline-block;
-          padding: 6px 10px;
-          border: 1px solid #ddd;
-          border-radius: 6px;
-          text-decoration: none;
-          color: #111;
-          background: #f7f7f9;
-          cursor: pointer;
-        }
-        .btn:hover { background: #eee; }
-        pre { margin: 0; }
-      `}</style>
-    </main>
+      <p style={{ marginTop: 16, color: '#555' }}><b>Status:</b> {msg}</p>
+
+      <hr style={{ margin: '20px 0' }} />
+      <ol>
+        <li>Click <b>🚪 Logout</b> if things feel stuck.</li>
+        <li>Click <b>🌱 Seed Server from Clipboard</b> (copy either full tokens JSON containing <code>refresh_token</code> or copy the actual JWT that starts with <code>eyJ</code>).</li>
+        <li>Click <b>🧪 Probe Graph /me</b>. If OK, you’re good to log pages.</li>
+      </ol>
+    </div>
   );
-}
-
-function Section({ title, children }) {
-  return (
-    <section style={{ marginTop: 18 }}>
-      <h3 style={{ margin: "8px 0" }}>{title}</h3>
-      <div style={{ background: "#0d1117", color: "#c9d1d9", padding: 12, borderRadius: 6, overflowX: "auto" }}>
-        {children}
-      </div>
-    </section>
-  );
-}
-
-function fmt(x) {
-  if (x === null || x === undefined) return "—";
-  if (x?.loading) return "Loading…";
-  try { return JSON.stringify(x, null, 2); } catch { return String(x); }
 }
