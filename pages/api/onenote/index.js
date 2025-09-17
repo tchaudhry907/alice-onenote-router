@@ -1,229 +1,119 @@
 // pages/api/onenote/index.js
-// Unified OneNote API router (v2)
-//
-// Actions supported (via POST JSON body { act: "..." } unless noted):
-// - GET  ?act=me                     -> proxies Graph /me using your bearer/cookie
-// - POST {act:"create", notebookName, sectionName, title, html}
-// - POST {act:"batch",  notebookName, sectionNames: []}             (idempotent)
-// - POST {act:"cleanup", notebookName?, sectionNames?, titlePrefix?} (soft-delete testy notes)
-//   Defaults for cleanup: looks for titles starting with [DIAG], [TEST], [WORKOUT] quick log, etc.
-//
-// Bearer is taken from:
-//   1) req.headers.authorization ("Authorization: Bearer …"), OR
-//   2) req.cookies.access_token (we synthesize "Bearer …")
-//
-// All responses are normalized: { ok: true/false, ... , version: "onenote-v2" }
+import { getGraphToken, isJwt } from '@/lib/auth-token';
+
+async function gfetch(token, url, init = {}) {
+  const r = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(init.headers || {}),
+    },
+    cache: 'no-store',
+  });
+  const text = await r.text();
+  let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  if (!r.ok) {
+    const err = new Error(`${r.status} ${r.statusText}`);
+    err.response = { status: r.status, statusText: r.statusText, body: json };
+    throw err;
+  }
+  return json;
+}
+
+async function findNotebookId(token, name) {
+  const data = await gfetch(token, 'https://graph.microsoft.com/v1.0/me/onenote/notebooks?$select=id,displayName');
+  const match = (data.value || []).find(n => (n.displayName || '').trim() === name.trim());
+  if (!match) throw new Error(`Notebook not found: ${name}`);
+  return match.id;
+}
+
+async function findSectionId(token, notebookId, sectionName) {
+  const data = await gfetch(token, `https://graph.microsoft.com/v1.0/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections?$select=id,displayName`);
+  const match = (data.value || []).find(s => (s.displayName || '').trim() === sectionName.trim());
+  if (!match) throw new Error(`Section not found: ${sectionName}`);
+  return match.id;
+}
+
+async function createPageInSection(token, sectionId, title, html) {
+  // OneNote create page: POST HTML multipart
+  // Minimal HTML works; title is set via <title> in the HTML payload.
+  const content =
+    `<!DOCTYPE html><html><head><title>${escapeHtml(title)}</title></head><body>${html || 'ok'}</body></html>`;
+
+  const r = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(sectionId)}/pages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'text/html',
+    },
+    body: content,
+  });
+
+  const text = await r.text();
+  let json; try { json = JSON.parse(text); } catch { json = { raw: text } }
+  if (!r.ok) {
+    const err = new Error(`${r.status} ${r.statusText}`);
+    err.response = { status: r.status, statusText: r.statusText, body: json };
+    throw err;
+  }
+  return json;
+}
+
+function escapeHtml(s = '') {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
 
 export default async function handler(req, res) {
   try {
-    const act = (req.method === "GET" ? (req.query.act || "") : (req.body?.act || "")).toString().toLowerCase();
-
-    // Routing
-    if (req.method === "GET" && act === "me") {
-      const bearer = getBearerFromReq(req);
-      if (!bearer) return json(res, 401, { ok: false, error: "No access token", version: V });
-      const j = await graphGET("/me", bearer);
-      return json(res, 200, j.ok ? { ok: true, me: j.json, version: V } : { ok: false, error: j.error, version: V });
+    const { token, source } = await getGraphToken(req);
+    if (!token) {
+      return res.status(200).json({ ok: false, error: 'No access token (header/cookie/KV). Open /debug/diagnostics and Seed or Force Login first.' });
     }
 
-    if (req.method !== "POST") {
-      return json(res, 405, { ok: false, error: "Use GET ?act=me or POST with {act}", version: V });
+    // GET ?act=me
+    if (req.method === 'GET') {
+      const act = (req.query.act || '').toString();
+      if (act === 'me') {
+        const data = await gfetch(token, 'https://graph.microsoft.com/v1.0/me');
+        return res.status(200).json({ ok: true, source, tokenLooksJwt: isJwt(token), me: data });
+      }
+      return res.status(200).json({ ok: true, message: 'Use POST with { act: "create", ... } or GET ?act=me' });
     }
 
-    const bearer = getBearerFromReq(req);
-    if (!bearer) return json(res, 401, { ok: false, error: "No access token (header or cookie)", version: V });
+    // POST actions
+    if (req.method === 'POST') {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+      const act = (body.act || '').toString();
 
-    switch (act) {
-      case "create": {
-        const {
-          notebookName = "AliceChatGPT",
-          sectionName,
-          title = "[DIAG] Untitled",
-          html = "<p>Hello from unified endpoint</p>",
-        } = req.body || {};
-        if (!notebookName || !sectionName) return json(res, 400, { ok: false, error: "notebookName and sectionName required", version: V });
-
-        const nb = await findNotebookByName(bearer, notebookName);
-        if (!nb) return json(res, 404, { ok: false, error: `Notebook not found: ${notebookName}`, version: V });
-
-        const sec = await findSectionByName(bearer, nb.id, sectionName);
-        if (!sec) return json(res, 404, { ok: false, error: `Section not found: ${sectionName}`, version: V });
-
-        const created = await createPage(bearer, sec.id, title, html);
-        if (!created.ok) return json(res, 200, { ok: false, error: created.error, version: V });
-        return json(res, 200, { ok: true, created: created.json, version: V });
+      if (act === 'me') {
+        const data = await gfetch(token, 'https://graph.microsoft.com/v1.0/me');
+        return res.status(200).json({ ok: true, source, tokenLooksJwt: isJwt(token), me: data });
       }
 
-      case "batch": {
-        const { notebookName = "AliceChatGPT", sectionNames } = req.body || {};
-        if (!notebookName || !Array.isArray(sectionNames) || sectionNames.length === 0) {
-          return json(res, 400, { ok: false, error: "notebookName and non-empty sectionNames[] required", version: V });
+      if (act === 'create') {
+        const { notebookName, sectionName, title, html } = body;
+        if (!notebookName || !sectionName || !title) {
+          return res.status(400).json({ ok: false, error: 'Missing notebookName, sectionName, or title' });
         }
-
-        const nb = await findNotebookByName(bearer, notebookName);
-        if (!nb) return json(res, 404, { ok: false, error: `Notebook not found: ${notebookName}`, version: V });
-
-        const current = await listSections(bearer, nb.id);
-        if (!current.ok) return json(res, 200, { ok: false, error: current.error, version: V });
-
-        const have = new Set((current.json.value || []).map(s => (s.displayName || "").trim().toLowerCase()));
-        const toCreate = sectionNames.filter(n => !have.has(n.trim().toLowerCase()));
-
-        const created = [];
-        const skipped = [];
-        for (const name of sectionNames) {
-          if (toCreate.includes(name)) {
-            const r = await graphPOST(`/me/onenote/notebooks/${enc(nb.id)}/sections`, bearer, {
-              displayName: name
-            }, "application/json");
-            if (r.ok) created.push({ name, id: r.json?.id });
-            else skipped.push({ name, error: r.error || "create failed" });
-          } else {
-            skipped.push({ name, reason: "exists" });
-          }
-        }
-
-        return json(res, 200, { ok: true, notebookId: nb.id, created, skipped, version: V });
+        const nbId = await findNotebookId(token, notebookName);
+        const secId = await findSectionId(token, nbId, sectionName);
+        const page = await createPageInSection(token, secId, title, html || 'ok');
+        return res.status(200).json({ ok: true, page });
       }
 
-      case "cleanup": {
-        const {
-          notebookName = "AliceChatGPT",
-          sectionNames,                     // optional; if omitted, all sections in notebook
-          titlePrefix = "[DIAG],[TEST],[WORKOUT] quick log,[HOBBY] RC cars — parts list"
-        } = req.body || {};
-
-        const nb = await findNotebookByName(bearer, notebookName);
-        if (!nb) return json(res, 404, { ok: false, error: `Notebook not found: ${notebookName}`, version: V });
-
-        // Sections to sweep
-        const allSecs = await listSections(bearer, nb.id);
-        if (!allSecs.ok) return json(res, 200, { ok: false, error: allSecs.error, version: V });
-
-        const wanted = sectionNames && sectionNames.length
-          ? (allSecs.json.value || []).filter(s => sectionNames.map(x => x.trim().toLowerCase()).includes((s.displayName || "").trim().toLowerCase()))
-          : (allSecs.json.value || []);
-
-        const prefixes = titlePrefix.split(",").map(s => s.trim()).filter(Boolean);
-        const deleted = [];
-        const errors = [];
-
-        // For each section, list pages and soft-delete those with matching prefixes
-        for (const sec of wanted) {
-          const pages = await graphGET(`/me/onenote/sections/${enc(sec.id)}/pages?$select=id,title,links`, bearer);
-          if (!pages.ok) { errors.push({ section: sec.displayName, error: pages.error }); continue; }
-
-          for (const p of (pages.json.value || [])) {
-            const t = (p.title || "");
-            if (prefixes.some(pref => t.startsWith(pref))) {
-              const del = await graphDELETE(`/me/onenote/pages/${enc(p.id)}`, bearer);
-              if (del.ok) deleted.push({ id: p.id, title: t, section: sec.displayName });
-              else errors.push({ id: p.id, title: t, error: del.error });
-            }
-          }
-        }
-
-        return json(res, 200, { ok: true, deleted, errors, version: V });
-      }
-
-      default:
-        return json(res, 400, { ok: false, error: `Unknown act: ${act}`, version: V });
+      return res.status(400).json({ ok: false, error: `Unknown act: ${act}` });
     }
+
+    // Other methods
+    res.setHeader('Allow', 'GET, POST');
+    return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
   } catch (e) {
-    return json(res, 200, { ok: false, error: String(e && e.message || e), version: V });
-  }
-}
-
-/* ----------------------- helpers ----------------------- */
-const V = "onenote-v2";
-
-function json(res, code, obj) {
-  res.status(code).json(obj);
-}
-
-function getBearerFromReq(req) {
-  const h = req.headers?.authorization || "";
-  if (h) return h.startsWith("Bearer ") ? h : `Bearer ${h.replace(/^Authorization:\s*/i, "")}`;
-  const cookieTok = req.cookies?.access_token;
-  return cookieTok ? `Bearer ${cookieTok}` : "";
-}
-
-async function graphGET(path, bearer) {
-  try {
-    const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-      headers: { Authorization: bearer },
+    // Bubble up Graph errors cleanly
+    const status = e?.response?.status || 500;
+    return res.status(status).json({
+      ok: false,
+      error: e.message,
+      details: e?.response || undefined,
     });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false, error: `graph GET ${path} -> ${r.status}: ${stringify(j)}` };
-    return { ok: true, json: j };
-  } catch (e) {
-    return { ok: false, error: String(e && e.message || e) };
   }
 }
-
-async function graphPOST(path, bearer, body, contentType = "application/json") {
-  try {
-    const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-      method: "POST",
-      headers: { Authorization: bearer, "Content-Type": contentType },
-      body: contentType === "application/json" ? JSON.stringify(body) : body,
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false, error: `graph POST ${path} -> ${r.status}: ${stringify(j)}` };
-    return { ok: true, json: j };
-  } catch (e) {
-    return { ok: false, error: String(e && e.message || e) };
-  }
-}
-
-async function graphDELETE(path, bearer) {
-  try {
-    const r = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-      method: "DELETE",
-      headers: { Authorization: bearer },
-    });
-    if (r.status === 204) return { ok: true };
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false, error: `graph DELETE ${path} -> ${r.status}: ${stringify(j)}` };
-    return { ok: true, json: j };
-  } catch (e) {
-    return { ok: false, error: String(e && e.message || e) };
-  }
-}
-
-async function findNotebookByName(bearer, notebookName) {
-  const r = await graphGET(`/me/onenote/notebooks?$select=id,displayName`, bearer);
-  if (!r.ok) return null;
-  const want = (notebookName || "").trim().toLowerCase();
-  return (r.json.value || []).find(n => (n.displayName || "").trim().toLowerCase() === want) || null;
-}
-
-async function listSections(bearer, notebookId) {
-  return await graphGET(`/me/onenote/notebooks/${enc(notebookId)}/sections?$select=id,displayName`, bearer);
-}
-
-async function findSectionByName(bearer, notebookId, sectionName) {
-  const r = await listSections(bearer, notebookId);
-  if (!r.ok) return null;
-  const want = (sectionName || "").trim().toLowerCase();
-  return (r.json.value || []).find(s => (s.displayName || "").trim().toLowerCase() === want) || null;
-}
-
-async function createPage(bearer, sectionId, title, html) {
-  const boundary = "----AliceUnifiedBoundary" + Math.random().toString(36).slice(2);
-  const htmlDoc = `<!DOCTYPE html><html><head><title>${escapeHtml(title)}</title></head><body>${html}</body></html>`;
-  const body =
-    `--${boundary}\r\n` +
-    `Content-Disposition: form-data; name="Presentation"\r\n` +
-    `Content-Type: text/html\r\n\r\n` +
-    htmlDoc + `\r\n` +
-    `--${boundary}--\r\n`;
-
-  return await graphPOST(`/me/onenote/sections/${enc(sectionId)}/pages`, bearer, body, `multipart/form-data; boundary=${boundary}`);
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-function enc(s) { return encodeURIComponent(s); }
-function stringify(x) { try { return JSON.stringify(x); } catch { return String(x); } }
