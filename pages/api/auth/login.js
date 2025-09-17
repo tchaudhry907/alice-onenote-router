@@ -1,45 +1,25 @@
 // pages/api/auth/login.js
-/**
- * Starts Microsoft OAuth (v2) using the Authorization Code flow.
- * Redirects the browser to the /authorize URL with response_type=code.
- *
- * Env needed:
- *   MS_CLIENT_ID
- *   MS_TENANT                 e.g. "common" or "consumers"
- *   APP_BASE_URL              e.g. "https://alice-onenote-router.vercel.app"
- *   MS_SCOPES (optional)      default includes offline_access for refresh
- */
-export default async function handler(req, res) {
-  const TENANT = process.env.MS_TENANT || "common";
-  const CLIENT_ID = process.env.MS_CLIENT_ID;
-  const APP_BASE_URL = process.env.APP_BASE_URL;
+// Redirect user to Microsoft Login (Auth Code Flow)
 
-  if (!CLIENT_ID || !APP_BASE_URL) {
-    return res
-      .status(500)
-      .json({ ok: false, error: "Missing MS_CLIENT_ID or APP_BASE_URL" });
+export default async function handler(req, res) {
+  const tenant = process.env.MS_TENANT_ID || process.env.AZURE_TENANT_ID || "common";
+  const clientId = process.env.MS_CLIENT_ID || process.env.AZURE_CLIENT_ID;
+  const redirect =
+    process.env.MS_REDIRECT_URI ||
+    `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}/api/auth/callback`;
+
+  if (!clientId) {
+    res.status(500).json({ ok: false, error: "Missing MS_CLIENT_ID" });
+    return;
   }
 
-  const REDIRECT_URI =
-    process.env.REDIRECT_URI || `${APP_BASE_URL}/api/auth/callback`;
+  const scope = encodeURIComponent("openid offline_access profile https://graph.microsoft.com/.default");
+  const authUrl =
+    `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize` +
+    `?client_id=${encodeURIComponent(clientId)}` +
+    `&response_type=code&redirect_uri=${encodeURIComponent(redirect)}` +
+    `&response_mode=query&scope=${scope}`;
 
-  const SCOPES =
-    process.env.MS_SCOPES ||
-    "offline_access openid profile User.Read Notes.ReadWrite.All";
-
-  // Minimal state/nonce; for simplicity we leave them static here.
-  // If you want CSRF protection, generate and store state in a cookie.
-  const params = new URLSearchParams({
-    client_id: CLIENT_ID,
-    response_type: "code",
-    redirect_uri: REDIRECT_URI,
-    response_mode: "query",
-    scope: SCOPES,
-    prompt: "select_account", // guarantees an interactive prompt if needed
-  });
-
-  const authorizeUrl = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize?${params.toString()}`;
-
-  res.writeHead(302, { Location: authorizeUrl });
+  res.writeHead(302, { Location: authUrl });
   res.end();
 }
