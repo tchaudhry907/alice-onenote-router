@@ -13,28 +13,21 @@ async function graphFetch(path, token) {
 
 export default async function handler(req, res) {
   try {
-    // Try a few likely keys for the access token (seeded by diagnostics)
-    const candidateKeys = [
-      'ms:access_token',
-      'graph:access_token',
-      'auth:access_token',
-      'access_token'
-    ];
+    const candidateKeys = ['ms:access_token','graph:access_token','access_token'];
     let token = null;
     for (const k of candidateKeys) {
       const v = await kvGet(k);
-      if (v && typeof v === 'string' && v.includes('.')) { token = v; break; }
+      if (typeof v === 'string' && v.includes('.')) { token = v; break; }
     }
     if (!token) {
       return res.status(400).json({
         ok: false,
-        error: 'No server token found in KV. Go to /debug/diagnostics and click "Refresh Tokens" then "Seed Server with Tokens".',
+        error: 'No server token found in KV. Hit /api/onenote/seed with your Authorization header.',
         triedKeys: candidateKeys
       });
     }
 
     const me = await graphFetch('/me', token);
-    // Shorten body to avoid huge response
     const bodySnippet = me.text.length > 500 ? me.text.slice(0, 500) + '…' : me.text;
 
     return res.status(200).json({
