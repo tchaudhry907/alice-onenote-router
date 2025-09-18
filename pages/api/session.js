@@ -1,5 +1,5 @@
 // pages/api/session.js
-// Simple session probe using KV.
+// Simple session probe using YOUR KV wrapper (no @vercel/kv).
 
 import { kv } from "@/lib/kv";
 
