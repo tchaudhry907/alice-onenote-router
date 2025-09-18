@@ -1,196 +1,192 @@
 // pages/api/log.js
-// Natural-language router → OneNote page creation (NoGraphListCalls)
-// Uses lib/sections.js for section IDs and posts to /api/onenote.
+import { NOTEBOOK_NAME, resolveSectionId, SECTIONS } from "@/lib/sections";
+import { nowInTZ } from "@/lib/time";
+import { kv } from "@vercel/kv";
 
-import { NOTEBOOK_NAME, resolveSectionId } from "@/lib/sections";
-
-function nowStamp() {
-  const pad = (n) => String(n).padStart(2, "0");
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = pad(d.getMonth() + 1);
-  const day = pad(d.getDate());
-  const hh = pad(d.getHours());
-  const mm = pad(d.getMinutes());
-  const ss = pad(d.getSeconds());
-  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
+async function getGraphToken() {
+  // Token was already being saved under this key in your app
+  return await kv.get("graph:access_token");
 }
 
-// Simple keyword routing. Order matters: most specific → general.
-function routeText(textRaw) {
-  const text = String(textRaw || "").trim();
-  const lc = text.toLowerCase();
+// Fallback: only if a section name can't be resolved, list sections once.
+async function healSectionsIfNeeded(targetName) {
+  const id = resolveSectionId(targetName);
+  if (id) return id;
 
-  // STEPS: "<number> steps"
-  const stepsMatch = lc.match(/\b(\d{3,})\b(?=.*\bsteps?\b)/i);
-  if (stepsMatch) {
-    const steps = stepsMatch[1];
-    const title = `[STEPS] ${steps} (${nowStamp()})`;
-    return {
-      sectionName: "Fitness - Step Counts",
-      title,
-      html: `<h2>${title}</h2><div><p>Steps: <b>${steps}</b></p><p>Note: ${escapeHtml(
-        text
-      )}</p></div>`,
-    };
+  const token = await getGraphToken();
+  if (!token) return null;
+
+  // Pull sections for the AliceChatGPT notebook
+  const res = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/notebooks?$select=id,displayName`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const nb = (data.value || []).find(n => n.displayName === NOTEBOOK_NAME);
+  if (!nb) return null;
+
+  const secRes = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/notebooks/${nb.id}/sections?$select=id,displayName&top=200`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!secRes.ok) return null;
+  const secData = await secRes.json();
+
+  // Cache a simple map in KV for a day
+  const map = {};
+  for (const s of secData.value || []) {
+    map[s.displayName] = s.id;
   }
+  await kv.set("sections:live", map, { ex: 86400 });
 
-  // WORKOUT
-  if (
-    /\b(workout|gym|upper body|lower body|deadlift|squat|bench|cardio|run|cycle|peloton)\b/i.test(
-      lc
-    )
-  ) {
-    const title = `[WORKOUT] ${text} (${nowStamp()})`;
-    return {
-      sectionName: "Fitness - Workouts",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>Workout: <b>${escapeHtml(
-        text
-      )}</b></p></div>`,
-    };
-  }
+  // Try again with both hyphen variants
+  const ascii = String(targetName).replace(/\u2013/g, "-");
+  const enDash = String(targetName).replace(/-/g, "–");
 
-  // ALCOHOL notes
-  if (/\b(whisky|whiskey|wine|beer|vodka|tequila|rum|tasting)\b/i.test(lc)) {
-    const title = `[ALCOHOL] ${text} (${nowStamp()})`;
-    return {
-      sectionName: "Food and Nutrition - Alcohol Notes",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(text)}</p></div>`,
-    };
-  }
-
-  // TRAVEL
-  if (/\b(flight|airport|airline|hotel|itinerary|check-?in|checkin|booked)\b/i.test(lc)) {
-    const title = `[TRAVEL] ${text} (${nowStamp()})`;
-    return {
-      sectionName: "Travel",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(text)}</p></div>`,
-    };
-  }
-
-  // JOURNAL
-  if (/^\s*journal\s*:/.test(lc) || /\breflection\b/i.test(lc)) {
-    const clean = text.replace(/^\s*journal\s*:\s*/i, "");
-    const title = `[JOURNAL] ${clean} (${nowStamp()})`;
-    return {
-      sectionName: "Journal",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(clean)}</p></div>`,
-    };
-  }
-
-  // WARDROBE shopping (clothing words)
-  if (
-    /\b(belt|socks|shirt|t-?shirt|jeans|trousers|pants|shoes|sneakers|jacket|hoodie|coat|dress|skirt|tie|blazer|suit|wardrobe|closet)\b/i.test(
-      lc
-    ) &&
-    /\b(buy|need to buy|shopping|order|purchase|pick up)\b/i.test(lc)
-  ) {
-    const title = `[WARDROBE] ${text} (${nowStamp()})`;
-    return {
-      sectionName: "Lifestyle and Wardrobe - Shopping List",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(text)}</p></div>`,
-    };
-  }
-
-  // FOOD / MEAL
-  if (/\b(ate|meal|breakfast|lunch|dinner|snack)\b/i.test(lc)) {
-    const title = `[MEAL] ${text} (${nowStamp()})`;
-    return {
-      sectionName: "Food and Nutrition",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(text)}</p></div>`,
-    };
-  }
-
-  // FINANCE & CAREER
-  if (
-    /\b(paid|pay|expense|bill|invoice|budget|rent|mortgage|salary|paycheck|deposit|transfer|bank|credit card|cc payment)\b/i.test(
-      lc
-    )
-  ) {
-    const title = `[FINANCE] ${text} (${nowStamp()})`;
-    return {
-      sectionName: "Finance and Career",
-      title,
-      html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(text)}</p></div>`,
-    };
-  }
-
-  // Default: plain note → Food and Nutrition
-  const title = `[NOTE] ${text} (${nowStamp()})`;
-  return {
-    sectionName: "Food and Nutrition",
-    title,
-    html: `<h2>${escapeHtml(title)}</h2><div><p>${escapeHtml(text)}</p></div>`,
-  };
+  return map[targetName] || map[ascii] || map[enDash] || null;
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+function classify(text) {
+  const t = (text || "").toLowerCase().trim();
+
+  // Steps
+  const mSteps = t.match(/\b(?:walk(?:ed)?|steps?)\s+(\d{3,6})(?:\s*steps?)?\b/);
+  if (mSteps) return { kind: "steps", value: mSteps[1] };
+
+  // Workout
+  if (/\bworkout\b|\bgym\b|\brun\b|\bupper body\b|\blower body\b/.test(t))
+    return { kind: "workout", value: text };
+
+  // Alcohol
+  if (/\b(whisk|whiskey|vodka|wine|beer|mezcal|bourbon|gin|rum)\b/.test(t))
+    return { kind: "alcohol", value: text };
+
+  // Wardrobe shopping (common clothing words + buy/need)
+  if (/\b(belt|sock|shirt|pants|jeans|jacket|coat|shoe|sneaker|tie|dress)\b/.test(t) &&
+      /\b(buy|need|pick up|order)\b/.test(t))
+    return { kind: "wardrobe", value: text };
+
+  // Meal (ate / calories / breakfast/lunch/dinner)
+  if (/^ate\b|\bcalori|breakfast|lunch|dinner|snack/.test(t))
+    return { kind: "meal", value: text };
+
+  // Finance
+  if (/\b(paid|pay|bill|expense|transfer|salary|deposit|invoice)\b/.test(t))
+    return { kind: "finance", value: text };
+
+  // Journal catch-all
+  if (/\b(journal|reflection|gratitude|note:)\b/.test(t))
+    return { kind: "journal", value: text };
+
+  // Default: generic Food & Nutrition note
+  return { kind: "note", value: text };
+}
+
+function render(kind, value, stamp) {
+  switch (kind) {
+    case "steps":
+      return {
+        sectionName: "Fitness – Step Counts",
+        title: `[STEPS] ${value} (${stamp})`,
+        html: `<h2>[STEPS] ${value} (${stamp})</h2><div><p>Steps: <b>${value}</b></p><p>Note: walked ${value} steps</p></div>`
+      };
+    case "workout":
+      return {
+        sectionName: "Fitness – Workouts",
+        title: `[WORKOUT] ${value} (${stamp})`,
+        html: `<h2>[WORKOUT] ${value} (${stamp})</h2><div><p>Workout: <b>${value}</b></p></div>`
+      };
+    case "meal":
+      return {
+        sectionName: "Food and Nutrition – Meals",
+        title: `[MEAL] ${value} (${stamp})`,
+        html: `<h2>[MEAL] ${value} (${stamp})</h2><div><p>${value}</p></div>`
+      };
+    case "alcohol":
+      return {
+        sectionName: "Food and Nutrition – Alcohol Notes",
+        title: `[ALCOHOL] ${value} (${stamp})`,
+        html: `<h2>[ALCOHOL] ${value} (${stamp})</h2><div><p>${value}</p></div>`
+      };
+    case "wardrobe":
+      return {
+        sectionName: "Lifestyle and Wardrobe – Shopping List",
+        title: `[WARDROBE] ${value} (${stamp})`,
+        html: `<h2>[WARDROBE] ${value} (${stamp})</h2><div><p>${value}</p></div>`
+      };
+    case "finance":
+      return {
+        sectionName: "Finance & Career",
+        title: `[FINANCE] ${value}`,
+        html: `<h2>[FINANCE] ${value}</h2><div><p>${value}</p></div>`
+      };
+    case "journal":
+      return {
+        sectionName: "Journal",
+        title: `[JOURNAL] ${value} (${stamp})`,
+        html: `<h2>[JOURNAL] ${value} (${stamp})</h2><div><p>${value}</p></div>`
+      };
+    default:
+      return {
+        sectionName: "Food and Nutrition",
+        title: `[NOTE] ${value} (${stamp})`,
+        html: `<h2>[NOTE] ${value} (${stamp})</h2><div><p>${value}</p></div>`
+      };
+  }
+}
+
+async function createPage({ sectionId, title, html }) {
+  const token = await getGraphToken();
+  if (!token) throw new Error("No Graph access token in KV");
+
+  const res = await fetch(`https://graph.microsoft.com/v1.0/me/onenote/sections/${encodeURIComponent(sectionId)}/pages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/xhtml+xml",
+    },
+    body: `<!DOCTYPE html><html><head><title>${title}</title></head><body>${html}</body></html>`
+  });
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(`Graph create failed: ${res.status}`);
+    err.details = { status: res.status, body };
+    throw err;
+  }
+  return body;
 }
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      res.status(405).json({ ok: false, error: "Method Not Allowed" });
-      return;
-    }
+    if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
+
     const { text } = (req.body || {});
-    if (!text || typeof text !== "string") {
-      res.status(400).json({ ok: false, error: "Provide JSON { text: string }" });
-      return;
-    }
+    if (!text) return res.status(400).json({ ok: false, error: "Missing text" });
 
-    const routed = routeText(text);
-    const sectionId = resolveSectionId(routed.sectionName);
-    if (!sectionId) {
-      res.status(400).json({
-        ok: false,
-        error: `Section not found in map: ${routed.sectionName}`,
-        routed,
-      });
-      return;
-    }
+    // Duplicate guard (30s)
+    const norm = text.trim().toLowerCase().replace(/\s+/g, " ");
+    const dupKey = `dedupe:${norm}`;
+    const seen = await kv.get(dupKey);
+    if (seen) return res.json({ ok: true, deduped: true, message: "Dropped duplicate within 30s window." });
+    await kv.set(dupKey, 1, { ex: 30 });
 
-    // Self-call to /api/onenote (stays inside your deployment)
-    const base =
-      (req.headers["x-forwarded-proto"] ? `${req.headers["x-forwarded-proto"]}://` : "https://") +
-      req.headers.host;
+    // Local timestamp
+    const { stamp } = nowInTZ();
 
-    const createResp = await fetch(`${base}/api/onenote`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        act: "create",
-        notebookName: NOTEBOOK_NAME,
-        // use name instead of id — your /api/onenote resolves IDs via lib/sections
-        sectionName: routed.sectionName,
-        title: routed.title,
-        html: routed.html,
-      }),
-    });
+    // Classify + render
+    const c = classify(text);
+    const payload = render(c.kind, c.value, stamp);
 
-    const page = await createResp.json();
-    if (!createResp.ok || page?.ok === false) {
-      res.status(502).json({
-        ok: false,
-        error: page?.error || `Create page failed (${createResp.status})`,
-        details: page,
-        routed,
-      });
-      return;
-    }
+    // Resolve section id (fast map → fallback heal if needed)
+    let sectionId = resolveSectionId(payload.sectionName);
+    if (!sectionId) sectionId = await healSectionsIfNeeded(payload.sectionName);
+    if (!sectionId) return res.status(400).json({ ok: false, error: `Section not found: ${payload.sectionName}` });
 
-    res.status(200).json({ ok: true, routed, page: page.page || page });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err && err.message) || String(err) });
+    // Create page
+    const page = await createPage({ sectionId, title: payload.title, html: payload.html });
+
+    res.json({ ok: true, routed: { sectionName: payload.sectionName, sectionId, title: payload.title, html: payload.html }, page });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message || String(e), details: e.details || null });
   }
 }
