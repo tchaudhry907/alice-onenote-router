@@ -1,5 +1,5 @@
 // pages/api/cron/health.js
-// Health check: KV reachable, Graph token exists.
+// Health check: KV reachable, Graph token exists. Uses YOUR KV wrapper.
 
 import { kv } from "@/lib/kv";
 
