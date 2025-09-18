@@ -17,31 +17,47 @@ export default function LogPage() {
       });
       const j = await r.json();
       setOut(j);
+      // clear the box on success for rapid-fire logging
+      if (j?.ok) setText('');
     } catch (e) {
       setOut({ ok: false, error: String(e) });
     }
     setBusy(false);
   }
 
+  const webUrl = out?.page?.links?.oneNoteWebUrl?.href;
+
   return (
-    <div style={{ fontFamily:'system-ui,-apple-system,Segoe UI,Roboto,sans-serif', padding:24, maxWidth:800 }}>
+    <div style={{ fontFamily:'system-ui,-apple-system,Segoe UI,Roboto,sans-serif', padding:24, maxWidth:820 }}>
       <h1>Quick Log</h1>
       <p>Type what you did. I’ll route it to the right OneNote section.</p>
+
       <textarea
         value={text}
         onChange={(e)=>setText(e.target.value)}
-        rows={4}
+        rows={3}
         style={{ width:'100%', padding:12, borderRadius:8, border:'1px solid #ccc' }}
-        placeholder='Examples: "walked 10000 steps" · "workout upper body 45 min" · "chicken salad + rice"'
+        placeholder='e.g., "walked 10000 steps", "workout upper body 45 min", "ate chicken salad"'
       />
-      <div style={{ marginTop:12, display:'flex', gap:12 }}>
-        <button onClick={submit} disabled={busy} style={{ padding:'10px 14px', borderRadius:10, border:'1px solid #ccc', background:'#f7f7f7', cursor:'pointer' }}>
+
+      <div style={{ marginTop:12, display:'flex', gap:12, alignItems:'center' }}>
+        <button onClick={submit} disabled={busy}
+          style={{ padding:'10px 14px', borderRadius:10, border:'1px solid #ccc', background:'#f7f7f7', cursor:'pointer' }}>
           {busy ? 'Logging…' : 'Log It'}
         </button>
-        <a href="/debug/diagnostics" style={{ padding:'10px 14px', borderRadius:10, border:'1px solid #eee', textDecoration:'none' }}>Diagnostics</a>
+        <a href="/debug/diagnostics" style={{ padding:'10px 14px', borderRadius:10, border:'1px solid #eee', textDecoration:'none' }}>
+          Diagnostics
+        </a>
+        {webUrl && (
+          <a href={webUrl} target="_blank" rel="noreferrer"
+             style={{ marginLeft:'auto', padding:'10px 14px', borderRadius:10, border:'1px solid #d0e1ff', background:'#eef5ff', textDecoration:'none' }}>
+            Open in OneNote ↗
+          </a>
+        )}
       </div>
+
       {out && (
-        <pre style={{ marginTop:16, background:'#fafafa', padding:12, borderRadius:8, whiteSpace:'pre-wrap' }}>
+        <pre style={{ marginTop:16, background:'#fafafa', padding:12, borderRadius:8, whiteSpace:'pre-wrap', maxHeight:380, overflow:'auto' }}>
 {JSON.stringify(out, null, 2)}
         </pre>
       )}
