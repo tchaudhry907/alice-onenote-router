@@ -17,24 +17,27 @@ export default async function handler(req, res) {
     const section = String(sectionId).trim();
     const query = String(q).trim();
 
-    if (!section) return res.status(400).json({ ok: false, error: "Missing sectionId" });
-    if (!query) return res.status(400).json({ ok: false, error: "Missing q" });
+    if (!section) {
+      return res.status(400).json({ ok: false, error: "Missing sectionId" });
+    }
+    if (!query) {
+      return res.status(400).json({ ok: false, error: "Missing q" });
+    }
 
     const data = await graphFetch(
       "GET",
-      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(query)}`,
+      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(
+        query
+      )}`,
       null,
       {}
     );
 
     return res.status(200).json({ ok: true, data });
   } catch (err) {
-    // If callers ever decide to force a re-auth, they can hit a different endpoint.
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
 
-// Optional helper route (disabled by default):
-// If you ever want to expose a re-auth attempt via this endpoint, you could
-// wire a conditional that calls `await exchangeRefreshToken(...)` here.
-// For now, we only import it to satisfy legacy imports without changing behavior.
+// Note: exchangeRefreshToken is imported only for compatibility.
+// This endpoint does not attempt re-auth automatically.
