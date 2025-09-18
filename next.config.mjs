@@ -1,8 +1,13 @@
-// next.config.js
-// Force any '@vercel/kv' import to use our local '@/lib/kv' wrapper.
-// This eliminates build failures even if a stray file (or cache) still imports '@vercel/kv'.
+// next.config.mjs
+// ESM-compatible Next config (your package.json has "type": "module").
+// This aliases any '@vercel/kv' import to your local 'lib/kv.js'.
 
-const path = require("path");
+import path from "path";
+import { fileURLToPath } from "url";
+
+/** polyfill __dirname in ESM */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -17,4 +22,4 @@ const nextConfig = {
   },
 };
 
-module.exports = nextConfig;
+export default nextConfig;
