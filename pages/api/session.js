@@ -1,6 +1,4 @@
 // pages/api/session.js
-// Simple session probe using YOUR KV wrapper (no @vercel/kv).
-
 import { kv } from "@/lib/kv";
 
 export default async function handler(req, res) {
