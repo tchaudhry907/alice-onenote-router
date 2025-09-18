@@ -3,5 +3,11 @@
   "routes": [
     { "src": "/\\.well-known/(.*)", "dest": "/public/.well-known/$1" },
     { "src": "/openapi.yaml", "dest": "/public/openapi.yaml" }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/drain",
+      "schedule": "*/30 * * * *"
+    }
   ]
 }
