@@ -4,11 +4,11 @@
 import { routeAndFormat } from '@/lib/intent-route';
 import { getGraphToken } from '@/lib/auth-token';
 
-// Normalizer: lowercase, trim, collapse spaces, treat EN/EM dashes as '-'
+// Normalizer: lowercase, collapse spaces, treat EN/EM dashes as '-'
 function norm(s = '') {
   return s
-    .replace(/\u2013/g, '-') // EN DASH → hyphen
-    .replace(/\u2014/g, '-') // EM DASH → hyphen
+    .replace(/\u2013/g, '-') // EN DASH
+    .replace(/\u2014/g, '-') // EM DASH
     .replace(/[ \t]+/g, ' ')
     .trim()
     .toLowerCase();
@@ -76,7 +76,7 @@ export default async function handler(req, res) {
     const text = (body.text || '').trim();
     if (!text) return res.status(400).json({ ok: false, error: 'Missing "text"' });
 
-    // Route & format (decides target section + title + html)
+    // Decide target section + title + html
     const { sectionName, title, html } = routeAndFormat(text);
 
     // Resolve IDs (your notebook is AliceChatGPT)
