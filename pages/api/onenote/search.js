@@ -1,8 +1,6 @@
 // pages/api/onenote/search.js
 // Search pages within a section using OneNote $search.
 // GET params: sectionId (required), q (required)
-//
-// Example: /api/onenote/search?sectionId=...&q=Food:2025-09
 
 import { graphFetch, exchangeRefreshToken } from "@/lib/msgraph";
 
@@ -26,11 +24,7 @@ export default async function handler(req, res) {
 
     const data = await graphFetch(
       "GET",
-      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(
-        query
-      )}`,
-      null,
-      {}
+      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(q)}`
     );
 
     return res.status(200).json({ ok: true, data });
