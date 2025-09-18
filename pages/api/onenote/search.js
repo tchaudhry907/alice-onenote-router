@@ -1,7 +1,4 @@
 // pages/api/onenote/search.js
-// Search pages within a section using OneNote $search.
-// GET params: sectionId (required), q (required)
-
 import { graphFetch, exchangeRefreshToken } from "@/lib/msgraph";
 
 export default async function handler(req, res) {
@@ -14,17 +11,12 @@ export default async function handler(req, res) {
     const { sectionId = "", q = "" } = req.query || {};
     const section = String(sectionId).trim();
     const query = String(q).trim();
-
-    if (!section) {
-      return res.status(400).json({ ok: false, error: "Missing sectionId" });
-    }
-    if (!query) {
-      return res.status(400).json({ ok: false, error: "Missing q" });
-    }
+    if (!section) return res.status(400).json({ ok: false, error: "Missing sectionId" });
+    if (!query) return res.status(400).json({ ok: false, error: "Missing q" });
 
     const data = await graphFetch(
       "GET",
-      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(q)}`
+      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(query)}`
     );
 
     return res.status(200).json({ ok: true, data });
@@ -33,5 +25,4 @@ export default async function handler(req, res) {
   }
 }
 
-// Note: exchangeRefreshToken is imported only for compatibility.
-// This endpoint does not attempt re-auth automatically.
+// Note: exchangeRefreshToken is imported for compatibility only.
