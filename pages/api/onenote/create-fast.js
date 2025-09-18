@@ -11,12 +11,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = req.body && typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}");
+    const body =
+      req.body && typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}");
     const sectionId = String(body.sectionId || "").trim();
     const html = String(body.html || "").trim();
 
-    if (!sectionId) return res.status(400).json({ ok: false, error: "Missing sectionId" });
-    if (!html) return res.status(400).json({ ok: false, error: "Missing html" });
+    if (!sectionId) {
+      return res.status(400).json({ ok: false, error: "Missing sectionId" });
+    }
+    if (!html) {
+      return res.status(400).json({ ok: false, error: "Missing html" });
+    }
 
     const result = await createOneNotePageBySectionId(sectionId, html);
     return res.status(200).json({ ok: true, result });
