@@ -1,67 +1,95 @@
-// pages/api/cron/drain.js
-// Cron executor: pull payloads from KV queue and create OneNote pages.
+// /pages/api/cron/drain.js
+// Drains KV queue and posts to OneNote via lib/msgraph.v6.js
+// - Safe to retry (dedupeKey)
+// - Optional auth: set CRON_SECRET in env; if present, requires Authorization: Bearer <secret>
 
-import { kv } from '@vercel/kv';
-import { createPage } from '@/lib/msgraph';
+import crypto from "crypto";
+import { kv } from "@/lib/kv";
+import { graphClient } from "@/lib/msgraph.v6";
 
-const MAX_PER_RUN = parseInt(process.env.CRON_MAX_ITEMS || '20', 10);
+function stableHash(obj) {
+  const json = typeof obj === "string" ? obj : JSON.stringify(obj);
+  return crypto.createHash("sha256").update(json).digest("hex").slice(0, 16);
+}
 
 export default async function handler(req, res) {
-  // Allow GET (cron pings) and POST (manual)
-  if (req.method !== 'GET' && req.method !== 'POST') {
-    res.status(405).json({ ok: false, error: 'Method not allowed' });
-    return;
+  if (req.method !== "GET") {
+    res.setHeader("Allow", ["GET"]);
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  const results = [];
-  let processed = 0;
-  let failures = 0;
+  // Optional auth
+  const secret = process.env.CRON_SECRET;
+  if (secret) {
+    const hdr = req.headers.authorization || "";
+    const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
+    if (token !== secret) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+  }
+
+  const processed = [];
+  const skipped = [];
+  const errors = [];
 
   try {
-    for (; processed < MAX_PER_RUN; processed++) {
-      const raw = await kv.rpop('log:queue'); // we used LPUSH, so drain with RPOP (FIFO)
-      if (!raw) break;
+    const len = await kv.llen("queue:v1");
+    if (!len) {
+      return res.status(200).json({ ok: true, drained: 0, processed, skipped, errors });
+    }
 
-      let item;
-      try {
-        item = JSON.parse(raw);
-      } catch (e) {
-        failures++;
-        results.push({ ok: false, error: 'Bad JSON payload', raw });
+    const items = [];
+    for (let i = 0; i < len; i++) {
+      const raw = await kv.rpop("queue:v1");
+      if (raw) items.push(JSON.parse(raw));
+    }
+
+    const seen = new Set();
+    for (const item of items) {
+      const payload = item?.payload;
+      if (!payload) {
+        skipped.push({ reason: "no-payload" });
         continue;
       }
-
-      const { route, title, html } = item;
-      if (!route?.sectionId || !title || !html) {
-        failures++;
-        results.push({ ok: false, error: 'Missing required fields', item });
+      if (!payload.dedupeKey) payload.dedupeKey = stableHash(payload);
+      if (seen.has(payload.dedupeKey)) {
+        skipped.push({ dedupeKey: payload.dedupeKey, reason: "duplicate-in-batch" });
         continue;
       }
+      seen.add(payload.dedupeKey);
 
       try {
-        const page = await createPage({
-          sectionId: route.sectionId,
-          title,
-          html,
+        const result = await graphClient.postPayload(payload);
+        processed.push({
+          dedupeKey: payload.dedupeKey,
+          pageKey: payload.appendTo?.pageKey || null,
+          result,
         });
-        results.push({ ok: true, pageTitle: page?.title ?? title, sectionId: route.sectionId });
       } catch (err) {
-        failures++;
-        // Push back once if Graph hiccups (simple retry-once)
-        await kv.lpush('log:queue', JSON.stringify(item));
-        results.push({ ok: false, error: err.message });
-        break; // bail early to avoid burning through rate limits
+        // Requeue on error so we don't lose entries
+        await kv.lpush("queue:v1", JSON.stringify(item));
+        if (err?.status === 401 || err?.status === 403) {
+          // Token/auth issues → surface reauth hint but stop draining
+          return res.status(200).json({
+            ok: false,
+            drained: processed.length,
+            processed,
+            skipped,
+            errors: [...errors, { message: "Re-auth needed", code: err.status }],
+          });
+        }
+        errors.push({ message: String(err?.message || err) });
       }
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       ok: true,
+      drained: items.length,
       processed,
-      failures,
-      remaining: await kv.llen('log:queue'),
-      items: results,
+      skipped,
+      errors,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message, processed, failures, items: results });
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
