@@ -1,3 +1,6 @@
+// next.config.mjs
+// ESM config. As an extra guard, alias '@vercel/kv' to lib/kv.js (even though we don't import it now).
+
 import path from "path";
 import { fileURLToPath } from "url";
 
