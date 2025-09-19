@@ -1,7 +1,13 @@
-// This endpoint only works if the alias to a local stub is active.
-// It imports '@vercel/kv' ON PURPOSE to test your webpack alias.
-import kv from "@vercel/kv";  // should resolve to lib/kv-stub.js if alias works
+// pages/api/debug/kv-alias-check.js
+// Simple endpoint proving we are using the local stub (no '@vercel/kv').
 
-export default function handler(req, res) {
-  res.status(200).json({ ok: true, type: typeof kv, keys: Object.keys(kv || {}) });
+import kv from "@/lib/kv-stub";
+
+export default function handler(_req, res) {
+  res.status(200).json({
+    ok: true,
+    type: typeof kv,
+    keys: Object.keys(kv || {}),
+    note: "Resolved from lib/kv-stub (no alias, no external package)"
+  });
 }
