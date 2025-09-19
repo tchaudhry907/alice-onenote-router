@@ -6,23 +6,15 @@ export default async function handler(req, res) {
     res.setHeader("Allow", ["GET"]);
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
-
   try {
-    const { sectionId = "", q = "" } = req.query || {};
-    const section = String(sectionId).trim();
-    const query = String(q).trim();
+    const sectionId = String(req.query.sectionId || "").trim();
+    const q = String(req.query.q || "").trim();
+    if (!sectionId) return res.status(400).json({ ok: false, error: "Missing sectionId" });
 
-    if (!section) return res.status(400).json({ ok: false, error: "Missing sectionId" });
-    if (!query) return res.status(400).json({ ok: false, error: "Missing q" });
-
-    const data = await graphFetch(
-      "GET",
-      `/me/onenote/sections/${encodeURIComponent(section)}/pages?$search=${encodeURIComponent(query)}`
-    );
-
+    const suffix = q ? `?search=${encodeURIComponent(q)}` : "";
+    const data = await graphFetch("GET", `/me/onenote/sections/${encodeURIComponent(sectionId)}/pages${suffix}`);
     return res.status(200).json({ ok: true, data });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
-// Note: exchangeRefreshToken is imported for compatibility only.
