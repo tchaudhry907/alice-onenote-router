@@ -3,7 +3,9 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["*"],
-      "@vercel/kv": ["lib/kv-stub.js"]
+      "@/lib/*": ["lib/*"],
+      "@/pages/*": ["pages/*"]
+      /* NOTE: No '@vercel/kv' path mapping here anymore */
     }
   }
 }
