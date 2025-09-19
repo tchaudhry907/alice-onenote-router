@@ -23,4 +23,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 }
-// Note: exchangeRefreshToken is imported for compatibility only .
+// Note: exchangeRefreshToken is imported for compatibility only.
