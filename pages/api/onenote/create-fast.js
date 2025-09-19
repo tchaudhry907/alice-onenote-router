@@ -1,7 +1,3 @@
-// pages/api/onenote/create-fast.js
-// Create a OneNote page directly in a known sectionId (fast path).
-// Expects: POST JSON { sectionId: string, html: string }
-
 import { createOneNotePageBySectionId } from "@/lib/msgraph";
 
 export default async function handler(req, res) {
