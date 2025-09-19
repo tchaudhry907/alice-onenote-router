@@ -1,3 +1,4 @@
+// pages/api/onenote/create-fast.js
 import { createOneNotePageBySectionId } from "@/lib/msgraph";
 
 export default async function handler(req, res) {
