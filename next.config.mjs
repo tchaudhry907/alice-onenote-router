@@ -1,6 +1,3 @@
-// next.config.mjs
-// ESM config. Aliases '@vercel/kv' -> local 'lib/kv.js' so any stray import resolves.
-
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -14,10 +11,10 @@ const nextConfig = {
   webpack: (config) => {
     config.resolve.alias = {
       ...(config.resolve.alias || {}),
-      "@vercel/kv": path.resolve(__dirname, "lib/kv.js"),
+      "@vercel/kv": path.resolve(__dirname, "lib/kv.js")
     };
     return config;
-  },
+  }
 };
 
 export default nextConfig;
