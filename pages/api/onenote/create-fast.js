@@ -2,9 +2,7 @@
 import { createOneNotePageBySectionId } from "@/lib/msgraph.js";
 
 /**
- * Minimal working handler.
- * Expects POST with JSON: { accessToken, sectionId, html? }
- * Returns Graph response JSON or a clear error.
+ * POST { accessToken, sectionId, html? }
  */
 export default async function handler(req, res) {
   try {
