@@ -14,7 +14,6 @@ export default async function handler(req, res) {
     const pong = await redis.ping();
     res.status(200).json({ ok: true, pong, time: now });
   } catch (e) {
-    console.error(e);
     res.status(500).json({ ok: false, error: String(e) });
   }
 }
