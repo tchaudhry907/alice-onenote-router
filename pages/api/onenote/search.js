@@ -1,31 +1,26 @@
-// pages/api/onenote/search.js
-import { graphFetch, exchangeRefreshToken } from "@/lib/msgraph.js";
+// pages/api/onenote/create-fast.js
+import { createOneNotePageBySectionId } from "@/lib/msgraph.js";
 
 /**
- * GET /api/onenote/search?accessToken=...&q=...
- * or POST with { accessToken?, refreshToken?, q }
- * If refreshToken is provided but no accessToken, we attempt token exchange.
+ * POST { accessToken, sectionId, html? }
  */
 export default async function handler(req, res) {
   try {
-    let { accessToken, q, refreshToken } =
-      req.method === "GET" ? req.query : req.body || {};
-
-    if (!accessToken && refreshToken) {
-      const tokens = await exchangeRefreshToken(refreshToken);
-      accessToken = tokens.access_token;
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      return res.status(405).json({ ok: false, error: "Method Not Allowed" });
     }
 
-    if (!accessToken) {
-      return res.status(400).json({ ok: false, error: "Missing accessToken (or refreshToken)" });
-    }
-    if (!q) {
-      return res.status(400).json({ ok: false, error: "Missing query param q" });
+    const { accessToken, sectionId, html } = req.body || {};
+    if (!accessToken || !sectionId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required fields: accessToken, sectionId"
+      });
     }
 
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages?$search="${q}"`;
-    const data = await graphFetch(accessToken, url, { method: "GET" });
-    return res.status(200).json({ ok: true, data });
+    const result = await createOneNotePageBySectionId(accessToken, sectionId, html);
+    return res.status(200).json({ ok: true, result });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
