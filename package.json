@@ -1,9 +1,7 @@
 {
-  "name": "alice-onenote-router",
-  "version": "1.0.0",
+  "name": "alice-onenote-logger",
   "private": true,
-  "license": "MIT",
-  "type": "module",
+  "version": "1.0.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,18 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@types/node": "20.14.9",
-    "@types/react": "18.3.3",
-    "@upstash/redis": "1.28.3",
-    "cookie": "0.6.0",
-    "formidable": "3.5.0",
-    "mime-types": "2.1.35",
+    "@upstash/redis": "^1.28.3",
     "next": "14.2.5",
-    "node-fetch": "3.3.2",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "typescript": "5.5.4",
-
-    "@vercel/kv": "file:./vercel-kv-stub"
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
   }
 }
