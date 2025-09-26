@@ -1,4 +1,15 @@
 {
+  "build": {
+    "env": {
+      "NODE_VERSION": "18.x"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ],
   "crons": [
     {
       "path": "/api/cron/redis-heartbeat",
