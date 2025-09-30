@@ -1,4 +1,3 @@
-// pages/api/session.js
 import { Redis } from "@upstash/redis";
 
 const redis = new Redis({
