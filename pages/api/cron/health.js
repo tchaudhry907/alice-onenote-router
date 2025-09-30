@@ -1,4 +1,3 @@
-// pages/api/cron/health.js
 import { Redis } from "@upstash/redis";
 
 const redis = new Redis({
