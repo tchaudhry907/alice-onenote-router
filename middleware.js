@@ -1,12 +1,14 @@
-// middleware.js — TEMP pass-through to unblock 500s
-import { NextResponse } from "next/server";
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
 
-export function middleware() {
-  // Always allow while we verify routes. No redirects here.
+export function middleware(req: NextRequest) {
+  const url = new URL(req.url);
+  if (url.pathname.startsWith('/debug/diagnostics')) {
+    return new NextResponse('Not Found', { status: 404 });
+  }
   return NextResponse.next();
 }
 
-// Run on all paths (safe, because we just pass-through)
 export const config = {
-  matcher: ["/:path*"],
+  matcher: ['/debug/diagnostics/:path*'],
 };
