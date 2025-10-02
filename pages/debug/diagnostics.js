@@ -1,205 +1,296 @@
 // pages/debug/diagnostics.js
-// One-stop diagnostics: Login, Seed, Probe, Logout, Tokens (live)
-
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const btn = {
-  padding: "10px 14px",
-  borderRadius: 10,
-  border: "1px solid #ccc",
-  background: "#f7f7f7",
-  cursor: "pointer",
+  base: {
+    padding: "10px 14px",
+    borderRadius: 8,
+    border: "1px solid #ccc",
+    background: "#fff",
+    cursor: "pointer",
+    fontSize: 14,
+    fontWeight: 600,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  primary: {
+    background: "#0b5fff",
+    color: "#fff",
+    border: "1px solid #0b5fff",
+  },
+  danger: {
+    background: "#ff3b30",
+    color: "#fff",
+    border: "1px solid #ff3b30",
+  },
+  subtle: {
+    background: "#f6f6f6",
+  },
 };
 
-const row = { display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 };
+function Button({ children, style, onClick, title }) {
+  return (
+    <button
+      title={title}
+      style={{ ...btn.base, ...(style || {}) }}
+      onClick={onClick}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
 
-export default function Diagnostics() {
-  const [status, setStatus] = useState("Idle");
-  const [log, setLog] = useState([]);
-  const [tokens, setTokens] = useState(null);
+function Section({ title, children }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <h3 style={{ margin: "18px 0 8px", fontSize: 16 }}>{title}</h3>
+      <div>{children}</div>
+    </div>
+  );
+}
 
-  function append(name, payload) {
-    setLog((prev) => [{ ts: new Date().toLocaleTimeString(), name, payload }, ...prev].slice(0, 200));
-  }
+function TextRow({ label, value, placeholder, onChange, type = "text" }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      <label style={{ minWidth: 140, fontWeight: 600 }}>{label}</label>
+      <input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={onChange}
+        style={{
+          flex: 1,
+          padding: "8px 10px",
+          border: "1px solid #ccc",
+          borderRadius: 8,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        }}
+      />
+    </div>
+  );
+}
 
-  async function fetchTokens() {
-    try {
-      const r = await fetch("/api/debug/tokens", { cache: "no-store" });
-      const j = await r.json();
-      setTokens(j);
-      append("Tokens (refresh)", j);
-    } catch (e) {
-      append("Tokens (error)", e.message);
-    }
-  }
+export default function DiagnosticsPage() {
+  const [baseUrl, setBaseUrl] = useState("");
+  const [workerSecret, setWorkerSecret] = useState(""); // paste your cron secret here when needed
+  const [result, setResult] = useState("");
+  const [note, setNote] = useState("");
+  const consoleRef = useRef(null);
 
   useEffect(() => {
-    fetchTokens();
-    const url = new URL(window.location.href);
-    if (url.searchParams.get("login") === "ok") {
-      setStatus("Login OK — tokens saved");
-      url.searchParams.delete("login");
-      window.history.replaceState({}, "", url.toString());
-    }
-    if (url.searchParams.get("login") === "err") {
-      setStatus("Login error — check details in Output");
-      append("Login error", url.searchParams.get("msg") || "unknown");
-      url.searchParams.delete("login");
-      window.history.replaceState({}, "", url.toString());
+    // Build absolute base from current location for consistent copy/paste links
+    if (typeof window !== "undefined") {
+      setBaseUrl(`${window.location.protocol}//${window.location.host}`);
     }
   }, []);
 
-  function forceMicrosoftLogin() {
-    window.location.href = "/api/auth/login";
-  }
-
-  async function seedFromClipboardSmart() {
-    setStatus("Reading clipboard…");
+  const show = (title, data) => {
+    const stamp = new Date().toLocaleString();
+    let body = "";
     try {
-      const clip = await navigator.clipboard.readText();
-      const mJwt = clip.match(/\b(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\b/);
-      if (mJwt) {
-        const r = await fetch("/api/onenote/seed", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: mJwt[1] }),
-        });
-        const j = await r.json();
-        append("Seed JWT", j);
-        setStatus(r.ok ? "Seeded JWT OK" : "Seed error");
-        await fetchTokens();
-        return;
-      }
-      const mRefresh = clip.match(/"refresh_token"\s*:\s*"([^"]+)"/) || clip.match(/\b(M\.C[^\s"]+)\b/);
-      const refreshToken = mRefresh?.[1];
-      if (refreshToken) {
-        const r = await fetch("/api/onenote/seed-any", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ refresh_token: refreshToken }),
-        });
-        const j = await r.json();
-        append("Seed via refresh_token", j);
-        setStatus(r.ok ? "Refreshed + seeded OK" : "Refresh/seed error");
-        await fetchTokens();
-        return;
-      }
-      append("Seed from Clipboard", { error: "No JWT or refresh_token found in clipboard" });
-      setStatus("Clipboard missing JWT/refresh_token");
+      body = typeof data === "string" ? data : JSON.stringify(data, null, 2);
     } catch (e) {
-      append("Seed from Clipboard (error)", e.message);
-      setStatus("Seed failed");
+      body = String(data);
     }
-  }
+    setResult(`▶ ${title} @ ${stamp}\n\n${body}`);
+    setTimeout(() => {
+      consoleRef.current?.scrollTo?.({ top: consoleRef.current.scrollHeight, behavior: "smooth" });
+    }, 50);
+  };
 
-  async function probe() {
-    setStatus("Probing Graph /me…");
-    const r = await fetch("/api/onenote/probe", { cache: "no-store" });
-    const j = await r.json().catch(() => ({}));
-    append("Probe /me", j);
-    setStatus(r.ok && j.ok ? "Probe OK: 200" : "Probe failed");
-  }
+  const openAbs = (path) => {
+    const url = `${baseUrl}${path}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
 
-  async function logoutAll() {
-    setStatus("Logging out…");
-    const r = await fetch("/api/auth/logout", { method: "POST" });
-    const j = await r.json().catch(() => ({}));
-    append("Logout", j);
-    try { localStorage.clear(); } catch {}
-    try { sessionStorage.clear(); } catch {}
-    document.cookie.split(";").forEach((c) => {
-      const n = c.split("=")[0].trim();
-      if (n) document.cookie = `${n}=; Path=/; Max-Age=0; SameSite=Lax`;
-    });
-    await fetchTokens();
-    setStatus("Logged out — click Force Microsoft Login");
-  }
+  const get = async (path, title) => {
+    try {
+      const res = await fetch(`${baseUrl}${path}`, { method: "GET", credentials: "include" });
+      const ct = res.headers.get("content-type") || "";
+      const data = ct.includes("application/json") ? await res.json() : await res.text();
+      show(`${title} [GET ${path}]`, data);
+    } catch (e) {
+      show(`${title} [GET ${path}]`, String(e));
+    }
+  };
 
-  async function clearServerTokens() {
-    setStatus("Clearing server tokens…");
-    const r = await fetch("/api/onenote/token-clear", { method: "POST" });
-    const j = await r.json().catch(() => ({}));
-    append("Token Clear", j);
-    await fetchTokens();
-    setStatus("Server tokens cleared");
-  }
+  const post = async (path, title, bodyObj, headers = {}) => {
+    try {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: bodyObj ? JSON.stringify(bodyObj) : undefined,
+      });
+      const ct = res.headers.get("content-type") || "";
+      const data = ct.includes("application/json") ? await res.json() : await res.text();
+      show(`${title} [POST ${path}]`, data);
+    } catch (e) {
+      show(`${title} [POST ${path}]`, String(e));
+    }
+  };
 
-  async function createTestPage() {
-    setStatus("Creating test page…");
-    const r = await fetch("/api/onenote", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        act: "create",
-        notebookName: "AliceChatGPT",
-        sectionName: "Food and Nutrition – Meals",
-        title: `[FOOD] Smoke test (${new Date().toLocaleString()})`,
-        html: "ok",
-      }),
-    });
-    const j = await r.json().catch(() => ({}));
-    append("Create Page", j);
-    setStatus(r.ok ? "Create OK" : "Create failed");
-  }
+  const groups = useMemo(
+    () => [
+      {
+        title: "Auth",
+        actions: [
+          {
+            label: "Sign In",
+            style: btn.primary,
+            onClick: () => openAbs("/api/auth/login"),
+            tip: "Begin login flow (redirects to Microsoft).",
+          },
+          {
+            label: "Callback (manual)",
+            onClick: () => openAbs("/api/auth/callback"),
+            tip: "Only if redirect didn’t happen automatically.",
+          },
+          {
+            label: "Logout (force)",
+            style: btn.danger,
+            onClick: () => get("/api/debug/clear-cookies", "Clear Cookies"),
+            tip: "Clears auth cookies on this domain.",
+          },
+        ],
+      },
+      {
+        title: "Session & Cookies",
+        actions: [
+          { label: "Show Cookies (raw)", onClick: () => get("/api/debug/cookies", "Show Cookies") },
+          { label: "Show Cookies (pretty)", onClick: () => get("/api/debug/show-cookies", "Show Cookies Pretty") },
+          { label: "Token Peek", onClick: () => get("/api/debug/tokens", "Token Peek") },
+          { label: "Token Ages", onClick: () => openAbs("/debug/token-ages") },
+          { label: "Session Check", onClick: () => get("/api/debug/session", "Session Check") },
+        ],
+      },
+      {
+        title: "Graph / OneNote Probes",
+        actions: [
+          { label: "Graph Probe (/onenote/probe)", onClick: () => get("/api/onenote/probe", "Graph Probe") },
+          { label: "Create Test Page", onClick: () => get("/api/debug/create-test-page", "Create Test Page") },
+        ],
+      },
+      {
+        title: "Cron / Worker",
+        extra: (
+          <>
+            <TextRow
+              label="Worker Secret"
+              value={workerSecret}
+              placeholder="paste your cron secret here (not stored)"
+              onChange={(e) => setWorkerSecret(e.target.value)}
+              type="password"
+            />
+          </>
+        ),
+        actions: [
+          { label: "Bind Cron", onClick: () => get("/api/cron/bind", "Cron Bind") },
+          {
+            label: "Run Worker (POST, secret)",
+            style: btn.primary,
+            onClick: () =>
+              post("/api/cron/worker", "Run Worker (POST)", { secret: workerSecret || "" }),
+            tip: "Uses POST so your secret is not exposed in the URL.",
+          },
+          {
+            label: "Run Worker (GET, secret in URL)",
+            onClick: () => get(`/api/cron/worker?secret=${encodeURIComponent(workerSecret || "")}`, "Run Worker (GET)"),
+            tip: "Convenient for testing; reveals the secret in URL—use sparingly.",
+          },
+        ],
+      },
+      {
+        title: "Utilities",
+        actions: [
+          { label: "KV Ping", onClick: () => get("/api/redis/ping", "KV Ping") },
+          { label: "Health", onClick: () => get("/api/health", "Health") },
+          { label: "Routes", onClick: () => get("/api/debug/routes", "Route List") },
+        ],
+      },
+    ],
+    [baseUrl, workerSecret]
+  );
 
   return (
-    <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", padding: 24, lineHeight: 1.5 }}>
-      <h1>Alice Diagnostics</h1>
+    <div style={{ maxWidth: 980, margin: "24px auto", padding: "0 16px" }}>
+      <h1 style={{ margin: "4px 0 10px" }}>Alice Diagnostics</h1>
+      <p style={{ color: "#444", marginBottom: 16 }}>
+        Quick controls for auth, cookies, Graph, and cron. Use the buttons below; results appear in the console.
+      </p>
 
-      <h3>Auth</h3>
-      <div style={row}>
-        <button style={btn} onClick={forceMicrosoftLogin}>🔐 Force Microsoft Login</button>
-        <button style={btn} onClick={logoutAll}>🚪 Logout (clear cookies + KV)</button>
-        <button style={btn} onClick={clearServerTokens}>🧹 Clear Server Tokens</button>
+      <div
+        style={{
+          border: "1px solid #eee",
+          borderRadius: 12,
+          padding: 16,
+          marginBottom: 16,
+          background: "#fafafa",
+        }}
+      >
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontWeight: 600 }}>Base URL:</span>
+          <code
+            style={{
+              background: "#fff",
+              border: "1px solid #ddd",
+              padding: "4px 8px",
+              borderRadius: 6,
+            }}
+          >
+            {baseUrl || "(resolving...)"}
+          </code>
+          <Button
+            style={btn.subtle}
+            onClick={() => {
+              navigator.clipboard?.writeText(baseUrl || "");
+              setNote("Copied base URL to clipboard.");
+              setTimeout(() => setNote(""), 2000);
+            }}
+          >
+            Copy
+          </Button>
+        </div>
+        {note && <div style={{ marginTop: 8, color: "#0b5fff" }}>{note}</div>}
       </div>
 
-      <h3 style={{ marginTop: 24 }}>Tokens</h3>
-      <div style={row}>
-        <button style={btn} onClick={seedFromClipboardSmart}>🌱 Seed Server from Clipboard</button>
-        <button style={btn} onClick={probe}>🧪 Probe Graph /me</button>
-        <a href="/api/debug/tokens?full=1" style={{ ...btn, textDecoration: "none" }}>🔎 View Tokens JSON</a>
-        <a href="/api/onenote/token-peek" style={{ ...btn, textDecoration: "none" }}>👀 Token Peek</a>
-      </div>
+      {groups.map((g, i) => (
+        <Section key={i} title={g.title}>
+          {g.extra || null}
+          <div style={{ display: "flex", flexWrap: "wrap" }}>
+            {g.actions.map((a, idx) => (
+              <Button key={idx} style={a.style} onClick={a.onClick} title={a.tip}>
+                {a.label}
+              </Button>
+            ))}
+          </div>
+        </Section>
+      ))}
 
-      <div style={{ marginTop: 12, padding: 12, background: "#fafafa", border: "1px solid #eee", borderRadius: 8 }}>
-        <b>Live tokens (from server KV):</b>
-        <pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>
-{tokens ? JSON.stringify(tokens, null, 2) : "Loading…"}
-        </pre>
-        <button style={btn} onClick={fetchTokens}>🔄 Refresh Tokens Panel</button>
-      </div>
+      <Section title="Result Console">
+        <div
+          ref={consoleRef}
+          style={{
+            border: "1px solid #e5e5e5",
+            borderRadius: 12,
+            padding: 12,
+            minHeight: 220,
+            background: "#0b1020",
+            color: "#d7f7ff",
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
+            whiteSpace: "pre-wrap",
+            overflow: "auto",
+          }}
+        >
+          {result || "Responses will appear here..."}
+        </div>
+      </Section>
 
-      <h3 style={{ marginTop: 24 }}>OneNote</h3>
-      <div style={row}>
-        <button style={btn} onClick={createTestPage}>📝 Create Test Page (Food & Nutrition – Meals)</button>
-      </div>
-
-      <h3 style={{ marginTop: 24 }}>Status</h3>
-      <p><b>{status}</b></p>
-
-      <h3>Output</h3>
-      <div style={{ maxHeight: 420, overflow: "auto", border: "1px solid #eee", borderRadius: 8 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead>
-            <tr style={{ background: "#fafafa" }}>
-              <th style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #eee", width: 120 }}>Time</th>
-              <th style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #eee", width: 220 }}>Action</th>
-              <th style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #eee" }}>Payload</th>
-            </tr>
-          </thead>
-          <tbody>
-            {log.length ? log.map((row, i) => (
-              <tr key={i}>
-                <td style={{ padding: 8, borderBottom: "1px solid #f3f3f3" }}>{row.ts}</td>
-                <td style={{ padding: 8, borderBottom: "1px solid #f3f3f3" }}>{row.name}</td>
-                <td style={{ padding: 8, borderBottom: "1px solid #f3f3f3", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", whiteSpace: "pre-wrap" }}>
-                  {typeof row.payload === "string" ? row.payload : JSON.stringify(row.payload, null, 2)}
-                </td>
-              </tr>
-            )) : <tr><td colSpan={3} style={{ padding: 12, color: "#888" }}>No output yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
+      <p style={{ color: "#666", fontSize: 12, marginTop: 10 }}>
+        Tip: Keep everything in the <strong>same tab</strong> after signing in so cookies stick.
+      </p>
     </div>
   );
 }
