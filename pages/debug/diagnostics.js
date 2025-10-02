@@ -1,296 +1,263 @@
 // pages/debug/diagnostics.js
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useState } from "react";
 
-const btn = {
-  base: {
-    padding: "10px 14px",
-    borderRadius: 8,
-    border: "1px solid #ccc",
-    background: "#fff",
-    cursor: "pointer",
-    fontSize: 14,
-    fontWeight: 600,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  primary: {
-    background: "#0b5fff",
-    color: "#fff",
-    border: "1px solid #0b5fff",
-  },
-  danger: {
-    background: "#ff3b30",
-    color: "#fff",
-    border: "1px solid #ff3b30",
-  },
-  subtle: {
-    background: "#f6f6f6",
-  },
-};
-
-function Button({ children, style, onClick, title }) {
+function JsonBox({ title, data }) {
   return (
-    <button
-      title={title}
-      style={{ ...btn.base, ...(style || {}) }}
-      onClick={onClick}
-      type="button"
-    >
-      {children}
-    </button>
-  );
-}
-
-function Section({ title, children }) {
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <h3 style={{ margin: "18px 0 8px", fontSize: 16 }}>{title}</h3>
-      <div>{children}</div>
+    <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, marginTop: 8 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{title}</div>
+      <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        {typeof data === "string" ? data : JSON.stringify(data, null, 2)}
+      </pre>
     </div>
   );
 }
 
-function TextRow({ label, value, placeholder, onChange, type = "text" }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-      <label style={{ minWidth: 140, fontWeight: 600 }}>{label}</label>
-      <input
-        type={type}
-        value={value}
-        placeholder={placeholder}
-        onChange={onChange}
-        style={{
-          flex: 1,
-          padding: "8px 10px",
-          border: "1px solid #ccc",
-          borderRadius: 8,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        }}
-      />
-    </div>
-  );
-}
+export default function Diagnostics() {
+  const [busy, setBusy] = useState(false);
 
-export default function DiagnosticsPage() {
-  const [baseUrl, setBaseUrl] = useState("");
-  const [workerSecret, setWorkerSecret] = useState(""); // paste your cron secret here when needed
-  const [result, setResult] = useState("");
-  const [note, setNote] = useState("");
-  const consoleRef = useRef(null);
+  // inputs
+  const [cronSecret, setCronSecret] = useState(""); // your CRON_SECRET
+  const [testText, setTestText] = useState("pumpkin spice latte — 300 calories");
+  const [sectionId, setSectionId] = useState(""); // optional override for quick log create
+  const [results, setResults] = useState([]);
 
-  useEffect(() => {
-    // Build absolute base from current location for consistent copy/paste links
-    if (typeof window !== "undefined") {
-      setBaseUrl(`${window.location.protocol}//${window.location.host}`);
-    }
-  }, []);
+  const pushResult = (title, data) =>
+    setResults((r) => [{ title, data, t: Date.now() }, ...r].slice(0, 30));
 
-  const show = (title, data) => {
-    const stamp = new Date().toLocaleString();
-    let body = "";
+  async function call(path, { method = "GET", body, headers } = {}) {
+    setBusy(true);
     try {
-      body = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-    } catch (e) {
-      body = String(data);
-    }
-    setResult(`▶ ${title} @ ${stamp}\n\n${body}`);
-    setTimeout(() => {
-      consoleRef.current?.scrollTo?.({ top: consoleRef.current.scrollHeight, behavior: "smooth" });
-    }, 50);
-  };
-
-  const openAbs = (path) => {
-    const url = `${baseUrl}${path}`;
-    window.open(url, "_blank", "noopener,noreferrer");
-  };
-
-  const get = async (path, title) => {
-    try {
-      const res = await fetch(`${baseUrl}${path}`, { method: "GET", credentials: "include" });
-      const ct = res.headers.get("content-type") || "";
-      const data = ct.includes("application/json") ? await res.json() : await res.text();
-      show(`${title} [GET ${path}]`, data);
-    } catch (e) {
-      show(`${title} [GET ${path}]`, String(e));
-    }
-  };
-
-  const post = async (path, title, bodyObj, headers = {}) => {
-    try {
-      const res = await fetch(`${baseUrl}${path}`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json", ...headers },
-        body: bodyObj ? JSON.stringify(bodyObj) : undefined,
+      const url = path.startsWith("http") ? path : `${path}`;
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(headers || {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
       });
+      let data;
       const ct = res.headers.get("content-type") || "";
-      const data = ct.includes("application/json") ? await res.json() : await res.text();
-      show(`${title} [POST ${path}]`, data);
+      if (ct.includes("application/json")) {
+        data = await res.json();
+      } else {
+        data = await res.text();
+      }
+      return { status: res.status, ok: res.ok, data };
     } catch (e) {
-      show(`${title} [POST ${path}]`, String(e));
+      return { status: 0, ok: false, data: String(e) };
+    } finally {
+      setBusy(false);
     }
+  }
+
+  // Buttons — Auth
+  const doLogin = () => {
+    // server will redirect into MS login and back to /debug/diagnostics?login=ok
+    window.location.href = "/api/auth/login";
+  };
+  const doLogout = () => (window.location.href = "/api/auth/logout");
+  const doCallback = () => (window.location.href = "/api/auth/callback");
+
+  const peekTokens = async () => {
+    const r = await call("/api/debug/tokens");
+    pushResult("Token Peek (/api/debug/tokens)", r);
+  };
+  const tokenAge = async () => {
+    const r = await call("/api/debug/token-age");
+    pushResult("Token Age (/api/debug/token-age)", r);
+  };
+  const forceGraphToken = async () => {
+    // if refresh_token cookie exists, server will exchange it
+    const r = await call("/api/auth/force-graph-token", { method: "POST" });
+    pushResult("Force Graph Token (/api/auth/force-graph-token)", r);
   };
 
-  const groups = useMemo(
-    () => [
-      {
-        title: "Auth",
-        actions: [
-          {
-            label: "Sign In",
-            style: btn.primary,
-            onClick: () => openAbs("/api/auth/login"),
-            tip: "Begin login flow (redirects to Microsoft).",
-          },
-          {
-            label: "Callback (manual)",
-            onClick: () => openAbs("/api/auth/callback"),
-            tip: "Only if redirect didn’t happen automatically.",
-          },
-          {
-            label: "Logout (force)",
-            style: btn.danger,
-            onClick: () => get("/api/debug/clear-cookies", "Clear Cookies"),
-            tip: "Clears auth cookies on this domain.",
-          },
-        ],
-      },
-      {
-        title: "Session & Cookies",
-        actions: [
-          { label: "Show Cookies (raw)", onClick: () => get("/api/debug/cookies", "Show Cookies") },
-          { label: "Show Cookies (pretty)", onClick: () => get("/api/debug/show-cookies", "Show Cookies Pretty") },
-          { label: "Token Peek", onClick: () => get("/api/debug/tokens", "Token Peek") },
-          { label: "Token Ages", onClick: () => openAbs("/debug/token-ages") },
-          { label: "Session Check", onClick: () => get("/api/debug/session", "Session Check") },
-        ],
-      },
-      {
-        title: "Graph / OneNote Probes",
-        actions: [
-          { label: "Graph Probe (/onenote/probe)", onClick: () => get("/api/onenote/probe", "Graph Probe") },
-          { label: "Create Test Page", onClick: () => get("/api/debug/create-test-page", "Create Test Page") },
-        ],
-      },
-      {
-        title: "Cron / Worker",
-        extra: (
-          <>
-            <TextRow
-              label="Worker Secret"
-              value={workerSecret}
-              placeholder="paste your cron secret here (not stored)"
-              onChange={(e) => setWorkerSecret(e.target.value)}
-              type="password"
-            />
-          </>
-        ),
-        actions: [
-          { label: "Bind Cron", onClick: () => get("/api/cron/bind", "Cron Bind") },
-          {
-            label: "Run Worker (POST, secret)",
-            style: btn.primary,
-            onClick: () =>
-              post("/api/cron/worker", "Run Worker (POST)", { secret: workerSecret || "" }),
-            tip: "Uses POST so your secret is not exposed in the URL.",
-          },
-          {
-            label: "Run Worker (GET, secret in URL)",
-            onClick: () => get(`/api/cron/worker?secret=${encodeURIComponent(workerSecret || "")}`, "Run Worker (GET)"),
-            tip: "Convenient for testing; reveals the secret in URL—use sparingly.",
-          },
-        ],
-      },
-      {
-        title: "Utilities",
-        actions: [
-          { label: "KV Ping", onClick: () => get("/api/redis/ping", "KV Ping") },
-          { label: "Health", onClick: () => get("/api/health", "Health") },
-          { label: "Routes", onClick: () => get("/api/debug/routes", "Route List") },
-        ],
-      },
-    ],
-    [baseUrl, workerSecret]
-  );
+  // Buttons — Cookies
+  const showCookies = async () => {
+    const r = await call("/api/debug/show-cookies");
+    pushResult("Show Cookies (/api/debug/show-cookies)", r);
+  };
+  const clearCookies = async () => {
+    const r = await call("/api/debug/clear-cookies", { method: "POST" });
+    pushResult("Clear Cookies (/api/debug/clear-cookies)", r);
+  };
+
+  // Buttons — Redis / Health
+  const redisPing = async () => {
+    const r = await call("/api/redis/ping");
+    pushResult("Redis Ping (/api/redis/ping)", r);
+  };
+  const health = async () => {
+    const r = await call("/api/health");
+    pushResult("App Health (/api/health)", r);
+  };
+  const cronHealth = async () => {
+    const r = await call("/api/cron/health");
+    pushResult("Cron Health (/api/cron/health)", r);
+  };
+
+  // Buttons — OneNote Graph
+  const probeMe = async () => {
+    const r = await call("/api/onenote/probe");
+    pushResult("OneNote Probe (/api/onenote/probe)", r);
+  };
+  const quickLog = async () => {
+    // your existing router will route the text; optionally include sectionId if you want to force a section
+    const body = sectionId
+      ? { text: testText, sectionId }
+      : { text: testText };
+    const r = await call("/api/log", { method: "POST", body });
+    pushResult("Quick Log (/api/log)", r);
+  };
+  const createTestPage = async () => {
+    const r = await call("/api/debug/create-test-page", { method: "POST" });
+    pushResult("Create Test Page (/api/debug/create-test-page)", r);
+  };
+
+  // Buttons — Cron Bind & Worker
+  const bindCron = async () => {
+    const r = await call("/api/cron/bind", {
+      method: "POST",
+      body: { secret: cronSecret },
+    });
+    pushResult("Bind Cron (/api/cron/bind)", r);
+  };
+  const runWorker = async () => {
+    const r = await call("/api/cron/worker", {
+      method: "POST",
+      body: { secret: cronSecret },
+    });
+    pushResult("Run Worker (/api/cron/worker)", r);
+  };
+
+  // Buttons — Misc Debug
+  const debugHeaders = async () => {
+    const r = await call("/api/debug/headers");
+    pushResult("Request Headers (/api/debug/headers)", r);
+  };
+  const debugEnv = async () => {
+    const r = await call("/api/debug/env");
+    pushResult("Server Env (/api/debug/env)", r);
+  };
+  const sessions = async () => {
+    const r = await call("/api/debug/sessions");
+    pushResult("Debug Sessions (/api/debug/sessions)", r);
+  };
 
   return (
-    <div style={{ maxWidth: 980, margin: "24px auto", padding: "0 16px" }}>
-      <h1 style={{ margin: "4px 0 10px" }}>Alice Diagnostics</h1>
-      <p style={{ color: "#444", marginBottom: 16 }}>
-        Quick controls for auth, cookies, Graph, and cron. Use the buttons below; results appear in the console.
+    <div style={{ maxWidth: 980, margin: "24px auto", padding: "0 16px", fontFamily: "ui-sans-serif, system-ui, -apple-system" }}>
+      <h1>Alice Diagnostics</h1>
+      <p style={{ marginTop: 0 }}>
+        Buttons to drive all the common flows (auth, tokens, cookies, Redis, OneNote, cron).
       </p>
 
-      <div
-        style={{
-          border: "1px solid #eee",
-          borderRadius: 12,
-          padding: 16,
-          marginBottom: 16,
-          background: "#fafafa",
-        }}
-      >
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontWeight: 600 }}>Base URL:</span>
-          <code
-            style={{
-              background: "#fff",
-              border: "1px solid #ddd",
-              padding: "4px 8px",
-              borderRadius: 6,
-            }}
-          >
-            {baseUrl || "(resolving...)"}
-          </code>
-          <Button
-            style={btn.subtle}
-            onClick={() => {
-              navigator.clipboard?.writeText(baseUrl || "");
-              setNote("Copied base URL to clipboard.");
-              setTimeout(() => setNote(""), 2000);
-            }}
-          >
-            Copy
-          </Button>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+        {/* Inputs */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Inputs</h3>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>CRON Secret (Vercel → Settings → Env → CRON_SECRET)</div>
+            <input
+              type="text"
+              value={cronSecret}
+              onChange={(e) => setCronSecret(e.target.value)}
+              placeholder="e.g. d8c4e3b8f1a64a09d5c9d2f6e8b4c3a1"
+              style={{ width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ccc" }}
+            />
+          </label>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>Test Text</div>
+            <input
+              type="text"
+              value={testText}
+              onChange={(e) => setTestText(e.target.value)}
+              style={{ width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ccc" }}
+            />
+          </label>
+          <label style={{ display: "block" }}>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>Optional Section ID (force)</div>
+            <input
+              type="text"
+              value={sectionId}
+              onChange={(e) => setSectionId(e.target.value)}
+              placeholder="leave blank to auto-route"
+              style={{ width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ccc" }}
+            />
+          </label>
         </div>
-        {note && <div style={{ marginTop: 8, color: "#0b5fff" }}>{note}</div>}
-      </div>
 
-      {groups.map((g, i) => (
-        <Section key={i} title={g.title}>
-          {g.extra || null}
-          <div style={{ display: "flex", flexWrap: "wrap" }}>
-            {g.actions.map((a, idx) => (
-              <Button key={idx} style={a.style} onClick={a.onClick} title={a.tip}>
-                {a.label}
-              </Button>
-            ))}
+        {/* Auth */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Auth</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={doLogin} disabled={busy}>Sign In (MS)</button>
+            <button onClick={doLogout} disabled={busy}>Force Logout</button>
+            <button onClick={doCallback} disabled={busy}>Hit /api/auth/callback</button>
+            <button onClick={peekTokens} disabled={busy}>Token Peek</button>
+            <button onClick={tokenAge} disabled={busy}>Token Age</button>
+            <button onClick={forceGraphToken} disabled={busy}>Force Graph Token</button>
           </div>
-        </Section>
-      ))}
-
-      <Section title="Result Console">
-        <div
-          ref={consoleRef}
-          style={{
-            border: "1px solid #e5e5e5",
-            borderRadius: 12,
-            padding: 12,
-            minHeight: 220,
-            background: "#0b1020",
-            color: "#d7f7ff",
-            fontFamily:
-              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
-            whiteSpace: "pre-wrap",
-            overflow: "auto",
-          }}
-        >
-          {result || "Responses will appear here..."}
         </div>
-      </Section>
 
-      <p style={{ color: "#666", fontSize: 12, marginTop: 10 }}>
-        Tip: Keep everything in the <strong>same tab</strong> after signing in so cookies stick.
-      </p>
+        {/* Cookies */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Cookies</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={showCookies} disabled={busy}>Show Cookies</button>
+            <button onClick={clearCookies} disabled={busy}>Clear Cookies</button>
+          </div>
+        </div>
+
+        {/* Redis & Health */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Redis & Health</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={redisPing} disabled={busy}>Redis Ping</button>
+            <button onClick={health} disabled={busy}>App Health</button>
+            <button onClick={cronHealth} disabled={busy}>Cron Health</button>
+          </div>
+        </div>
+
+        {/* OneNote */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>OneNote / Logging</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={probeMe} disabled={busy}>Probe (whoami)</button>
+            <button onClick={quickLog} disabled={busy}>Quick Log (router)</button>
+            <button onClick={createTestPage} disabled={busy}>Create Test Page</button>
+          </div>
+        </div>
+
+        {/* Cron */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Cron / Worker</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={bindCron} disabled={busy}>Bind Cron (store token)</button>
+            <button onClick={runWorker} disabled={busy}>Run Worker (manual)</button>
+          </div>
+        </div>
+
+        {/* Misc */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Misc Debug</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={debugHeaders} disabled={busy}>Request Headers</button>
+            <button onClick={debugEnv} disabled={busy}>Server Env (safe)</button>
+            <button onClick={sessions} disabled={busy}>Sessions</button>
+          </div>
+        </div>
+
+        {/* Results */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+          <h3 style={{ marginTop: 0 }}>Results</h3>
+          {results.length === 0 ? (
+            <div style={{ color: "#777" }}>No calls yet. Click a button above.</div>
+          ) : (
+            results.map((r) => <JsonBox key={r.t} title={r.title} data={r.data} />)
+          )}
+        </div>
+      </div>
     </div>
   );
 }
