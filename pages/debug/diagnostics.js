@@ -147,7 +147,7 @@ export default function Diagnostics() {
 
   return (
     <div style={{ maxWidth: 980, margin: "24px auto", padding: "0 16px", fontFamily: "ui-sans-serif, system-ui, -apple-system" }}>
-      <h1>Alice Diagnostics</h1>
+      <h1>Alice Diagnostics (buttons)</h1>
       <p style={{ marginTop: 0 }}>
         Buttons to drive all the common flows (auth, tokens, cookies, Redis, OneNote, cron).
       </p>
