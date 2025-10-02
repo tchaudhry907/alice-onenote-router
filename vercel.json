@@ -8,6 +8,6 @@
     { "src": "/api/(.*)", "dest": "/api/$1" }
   ],
   "crons": [
-    { "path": "/api/cron/redis-heartbeat", "schedule": "0 */12 * * *" }
+    { "path": "/api/cron/worker", "schedule": "0 */12 * * *" }
   ]
 }
