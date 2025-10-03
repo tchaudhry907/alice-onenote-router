@@ -1,15 +1,17 @@
+// middleware.js
 import { NextResponse } from "next/server";
 
 export function middleware(req) {
   const url = new URL(req.url);
-  if (url.pathname.startsWith("/debug/diagnostics")) {
-    const allow = process.env.ALLOW_DEBUG === "1";
-    if (!allow) {
-      return new NextResponse("Not Found", { status: 404 });
+  if (url.pathname.startsWith("/debug")) {
+    const allow = process.env.ALLOW_DEBUG;
+    if (!allow || allow === "0" || allow.toLowerCase() === "false") {
+      return new NextResponse("Diagnostics disabled. Set ALLOW_DEBUG=1 and redeploy.", { status: 403 });
     }
   }
-  // add a tiny signal header for the page gate
-  const res = NextResponse.next();
-  if (process.env.ALLOW_DEBUG === "1") res.headers.set("x-allow-debug", "1");
-  return res;
+  return NextResponse.next();
 }
+
+export const config = {
+  matcher: ["/debug/:path*"]
+};
